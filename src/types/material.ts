@@ -20,9 +20,18 @@ export type Material = {
   createdAt: Date;
   tab: Exclude<ContentTab, "tracks">;
   archived?: boolean;
+  hiddenFromLibrary?: boolean;
   trendingStamp?: TrendingStamp | null;
   views?: number;
   testUrl?: string;
+};
+
+export type TrackInfoBlock = {
+  id: string;
+  title: string;
+  text: string;
+  enabled: boolean;
+  afterMaterialId: string;
 };
 
 export type LearningTrack = {
@@ -30,6 +39,7 @@ export type LearningTrack = {
   title: string;
   description: string;
   materialIds: string[];
+  infoBlocks?: TrackInfoBlock[];
   tags?: string[];
   coverUrl?: string;
   createdAt: Date;

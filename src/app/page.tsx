@@ -351,6 +351,7 @@ export default function Home() {
             },
             duration: Number(data.duration ?? 0),
             trendingStamp: data.trendingStamp || undefined,
+            hiddenFromLibrary: data.hiddenFromLibrary === true,
             views: Number(data.views ?? 0),
             testUrl: data.testUrl ?? "",
             createdAt,
@@ -393,6 +394,7 @@ export default function Home() {
             title: data.title ?? "",
             description: data.description ?? "",
             materialIds: data.materialIds ?? [],
+            infoBlocks: data.infoBlocks ?? [],
             tags: data.tags ?? [],
             coverUrl: data.coverUrl ?? "",
             testUrl: data.testUrl ?? "",
@@ -585,8 +587,8 @@ export default function Home() {
 
   const materialsByTab = useMemo(
     () => ({
-      webinars: activeMaterials.filter((material) => material.tab === "webinars"),
-      knowledge: activeMaterials.filter((material) => material.tab === "knowledge")
+      webinars: activeMaterials.filter((material) => material.tab === "webinars" && !material.hiddenFromLibrary),
+      knowledge: activeMaterials.filter((material) => material.tab === "knowledge" && !material.hiddenFromLibrary)
     }),
     [activeMaterials]
   );

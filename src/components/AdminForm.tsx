@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   createUserWithEmailAndPassword,
@@ -32,7 +32,6 @@ import {
   FileSpreadsheet,
   FolderOpen,
   GraduationCap,
-  GripVertical,
   LogIn,
   LogOut,
   KeyRound,
@@ -56,11 +55,16 @@ import {
 } from "@/lib/firebase";
 import { loginToFirebaseEmail, normalizeLogin } from "@/lib/access";
 import { formatDate, uniqueSorted } from "@/lib/materials";
+import { TrackInfoEditor } from "@/components/TrackInfoEditor";
+import { TrackPreview } from "@/components/TrackPreview";
+import { TrackMaterialPicker } from "@/components/TrackMaterialPicker";
+import { UnsavedEditorProvider, useEditorDraft, useEditorNavigation } from "@/components/UnsavedEditor";
 import type {
   ContentTab,
   LearningTrack,
   Material,
   MaterialType,
+  TrackInfoBlock,
   TrendingStamp
 } from "@/types/material";
 import type { AccessUser } from "@/types/access-user";
@@ -121,6 +125,7 @@ const trendingStampOptions: TrendingStamp[] = [
 ];
 
 const initialMaterialForm = {
+  hiddenFromLibrary: false,
   title: "",
   description: "",
   type: "video" as MaterialType,
@@ -137,6 +142,7 @@ const initialMaterialForm = {
 };
 
 const initialTrackForm = {
+  infoBlocks: [] as TrackInfoBlock[],
   title: "",
   description: "",
   coverUrl: "",
@@ -294,7 +300,11 @@ function buildImportPreview(fileName: string, rows: unknown[][]): ImportPreview 
   };
 }
 
-export function AdminForm({
+export function AdminForm(props: AdminFormProps) {
+  return <UnsavedEditorProvider><AdminWorkspace {...props} /></UnsavedEditorProvider>;
+}
+
+function AdminWorkspace({
   user,
   isOpen,
   onClose,
@@ -303,6 +313,7 @@ export function AdminForm({
   materials,
   tracks
 }: AdminFormProps) {
+  const navigate = useEditorNavigation();
   const [loginEmail, setLoginEmail] = useState(ADMIN_EMAIL);
   const [loginPassword, setLoginPassword] = useState("");
   const [message, setMessage] = useState("");
@@ -506,12 +517,11 @@ export function AdminForm({
     }
   }
 
-  async function handleMaterialSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function handleMaterialSubmit() {
 
     if (!isAdmin || !db) {
       setMessage("Доступ разрешен только администратору.");
-      return;
+      return false;
     }
 
     const tab = addMode === "webinar" ? "webinars" : "knowledge";
@@ -522,6 +532,7 @@ export function AdminForm({
     try {
       await addDoc(collection(db, "materials"), {
         title: materialForm.title.trim(),
+        hiddenFromLibrary: materialForm.hiddenFromLibrary,
         description: materialForm.description.trim(),
         type: materialForm.type,
         url: materialForm.url.trim(),
@@ -549,19 +560,20 @@ export function AdminForm({
         format: tab === "webinars" ? "Вебинар" : "PDF"
       });
       setMessage("Материал добавлен.");
+      return true;
     } catch {
       setMessage("Не удалось сохранить материал. Проверьте права Firestore.");
+      return false;
     } finally {
       setIsSubmitting(false);
     }
   }
 
-  async function handleTrackSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function handleTrackSubmit() {
 
     if (!isAdmin || !db) {
       setMessage("Доступ разрешен только администратору.");
-      return;
+      return false;
     }
 
     setIsSubmitting(true);
@@ -575,6 +587,7 @@ export function AdminForm({
         testUrl: trackForm.testUrl.trim(),
         tags: splitList(trackForm.tags),
         materialIds: trackMaterialIds,
+        infoBlocks: trackForm.infoBlocks,
         archived: false,
         createdAt: serverTimestamp()
       });
@@ -582,8 +595,10 @@ export function AdminForm({
       setTrackForm(initialTrackForm);
       setTrackMaterialIds([]);
       setMessage("Обучающий трек добавлен.");
+      return true;
     } catch {
       setMessage("Не удалось сохранить трек. Проверьте права Firestore.");
+      return false;
     } finally {
       setIsSubmitting(false);
     }
@@ -591,7 +606,7 @@ export function AdminForm({
 
   async function updateMaterial(id: string, payload: Partial<Material>) {
     if (!db) {
-      return;
+      return false;
     }
 
     try {
@@ -611,6 +626,7 @@ export function AdminForm({
           title: source.title,
           description: source.description,
           type: source.type,
+          hiddenFromLibrary: source.hiddenFromLibrary ?? false,
           url: source.url,
           testUrl: source.testUrl ?? "",
           coverUrl: source.coverUrl ?? "",
@@ -632,15 +648,17 @@ export function AdminForm({
       }
 
       setMessage("Материал обновлен.");
+      return true;
     } catch (error) {
       console.error("Failed to update material:", error);
       setMessage("Не удалось обновить материал. Проверьте права Firestore.");
+      return false;
     }
   }
 
   async function updateTrack(id: string, payload: Partial<LearningTrack>) {
     if (!db) {
-      return;
+      return false;
     }
 
     try {
@@ -660,6 +678,7 @@ export function AdminForm({
           title: source.title,
           description: source.description,
           materialIds: source.materialIds,
+          infoBlocks: source.infoBlocks ?? [],
           tags: source.tags ?? [],
           coverUrl: source.coverUrl ?? "",
           testUrl: source.testUrl ?? "",
@@ -670,9 +689,11 @@ export function AdminForm({
       }
 
       setMessage("Трек обновлен.");
+      return true;
     } catch (error) {
       console.error("Failed to update track:", error);
       setMessage("Не удалось обновить трек. Проверьте права Firestore.");
+      return false;
     }
   }
 
@@ -979,7 +1000,7 @@ export function AdminForm({
             {user ? (
               <button
                 type="button"
-                onClick={handleLogout}
+                onClick={() => navigate(() => void handleLogout())}
                 className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
               >
                 <LogOut size={16} />
@@ -988,7 +1009,7 @@ export function AdminForm({
             ) : null}
             <button
               type="button"
-              onClick={onClose}
+              onClick={() => navigate(onClose)}
               aria-label="Закрыть"
               className="rounded-lg p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
             >
@@ -1022,28 +1043,28 @@ export function AdminForm({
                   active={section === "add"}
                   icon={<PlusCircle size={16} />}
                   label="Добавление"
-                  onClick={() => {
+                  onClick={() => navigate(() => {
                     setSection("add");
                     setSelectedEntityId(null);
-                  }}
+                  })}
                 />
                 <PillButton
                   active={section === "archive"}
                   icon={<Archive size={16} />}
                   label="Архив и управление"
-                  onClick={() => {
+                  onClick={() => navigate(() => {
                     setSection("archive");
                     setSelectedEntityId(null);
-                  }}
+                  })}
                 />
                 <PillButton
                   active={section === "users"}
                   icon={<Users size={16} />}
                   label="Пользователи"
-                  onClick={() => {
+                  onClick={() => navigate(() => {
                     setSection("users");
                     setSelectedEntityId(null);
-                  }}
+                  })}
                 />
               </div>
 
@@ -1075,7 +1096,8 @@ export function AdminForm({
                     materials={materials}
                     selectedIds={trackMaterialIds}
                     isSubmitting={isSubmitting}
-                    onBack={() => setAddMode("menu")}
+                    onBack={() => navigate(() => setAddMode("menu"))}
+                    onReset={() => { setTrackForm(initialTrackForm); setTrackMaterialIds([]); }}
                     onFormChange={setTrackForm}
                     onSubmit={handleTrackSubmit}
                     onToggleMaterial={toggleTrackMaterial}
@@ -1088,7 +1110,7 @@ export function AdminForm({
                     allTopicOptions={allTopicOptions}
                     formatDatalist={formatDatalist}
                     isSubmitting={isSubmitting}
-                    onBack={() => setAddMode("menu")}
+                    onBack={() => navigate(() => setAddMode("menu"))}
                     onFormChange={setMaterialForm}
                     onSubmit={handleMaterialSubmit}
                   />
@@ -1100,15 +1122,15 @@ export function AdminForm({
                   selectedId={selectedEntityId}
                   materials={materials}
                   tracks={tracks}
-                  onModeChange={(mode) => {
+                  onModeChange={(mode) => navigate(() => {
                     setArchiveMode(mode);
                     setSelectedEntityId(null);
-                  }}
-                  onFilterChange={(filter) => {
+                  })}
+                  onFilterChange={(filter) => navigate(() => {
                     setArchiveFilter(filter);
                     setSelectedEntityId(null);
-                  }}
-                  onSelect={setSelectedEntityId}
+                  })}
+                  onSelect={(id) => { if (id !== selectedEntityId) navigate(() => setSelectedEntityId(id)); }}
                   onUpdateMaterial={updateMaterial}
                   onUpdateTrack={updateTrack}
                   onDelete={deleteEntity}
@@ -1250,13 +1272,21 @@ function MaterialCreateForm({
   isSubmitting: boolean;
   onBack: () => void;
   onFormChange: (form: typeof initialMaterialForm) => void;
-  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onSubmit: () => Promise<boolean>;
 }) {
   const isWebinar = mode === "webinar";
+  const formRef = useRef<HTMLFormElement>(null);
+  const emptyForm = { ...initialMaterialForm, type: (isWebinar ? "video" : "file") as MaterialType, format: isWebinar ? "Вебинар" : "PDF" };
+  const save = useEditorDraft(form, async () => {
+    if (!formRef.current?.reportValidity()) return false;
+    return onSubmit();
+  }, () => onFormChange(emptyForm), emptyForm);
 
   return (
     <form
-      onSubmit={onSubmit}
+      ref={formRef}
+      inert={isSubmitting}
+      onSubmit={(event) => { event.preventDefault(); void save(); }}
       className="rounded-xl bg-white p-5 shadow-sm ring-1 ring-slate-200"
     >
       <FormHeader
@@ -1264,6 +1294,10 @@ function MaterialCreateForm({
         onBack={onBack}
       />
       <div className="mt-5 grid gap-4 md:grid-cols-2">
+        <label className="flex items-center gap-2 text-sm text-slate-700 md:col-span-2">
+          <input type="checkbox" checked={form.hiddenFromLibrary} onChange={(event) => onFormChange({ ...form, hiddenFromLibrary: event.target.checked })} />
+          Скрывать из библиотеки
+        </label>
         <TextField
           label="Название"
           value={form.title}
@@ -1271,7 +1305,7 @@ function MaterialCreateForm({
           required
         />
         <TextField
-          label={isWebinar ? "Ссылка на YouTube" : "Ссылка на файл"}
+          label={isWebinar ? "Ссылка на видео" : "Ссылка на файл"}
           value={form.url}
           placeholder="https://..."
           onChange={(value) => onFormChange({ ...form, url: value })}
@@ -1405,6 +1439,7 @@ function TrackCreateForm({
   onBack,
   onFormChange,
   onSubmit,
+  onReset,
   onToggleMaterial,
   onMoveMaterial
 }: {
@@ -1414,17 +1449,22 @@ function TrackCreateForm({
   isSubmitting: boolean;
   onBack: () => void;
   onFormChange: (form: typeof initialTrackForm) => void;
-  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+  onSubmit: () => Promise<boolean>;
+  onReset: () => void;
   onToggleMaterial: (id: string) => void;
   onMoveMaterial: (from: number, to: number) => void;
 }) {
-  const selectedMaterials = selectedIds
-    .map((id) => materials.find((material) => material.id === id))
-    .filter((material): material is Material => Boolean(material));
+  const formRef = useRef<HTMLFormElement>(null);
+  const save = useEditorDraft({ form, selectedIds }, async () => {
+    if (!formRef.current?.reportValidity()) return false;
+    return onSubmit();
+  }, onReset, { form: initialTrackForm, selectedIds: [] });
 
   return (
     <form
-      onSubmit={onSubmit}
+      ref={formRef}
+      inert={isSubmitting}
+      onSubmit={(event) => { event.preventDefault(); void save(); }}
       className="rounded-xl bg-white p-5 shadow-sm ring-1 ring-slate-200"
     >
       <FormHeader title="Добавить обучающий трек" onBack={onBack} />
@@ -1468,80 +1508,11 @@ function TrackCreateForm({
           </label>
         </div>
 
-        <div className="grid gap-4 lg:grid-cols-2">
-          <div className="rounded-xl border border-slate-200 p-4">
-            <h3 className="mb-3 text-sm font-semibold text-slate-900">
-              Материалы платформы
-            </h3>
-            <div className="max-h-96 space-y-2 overflow-y-auto">
-              {materials.map((material) => (
-                <label
-                  key={material.id}
-                  className="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 bg-white p-3 text-sm hover:bg-slate-50"
-                >
-                  <input
-                    type="checkbox"
-                    checked={selectedIds.includes(material.id)}
-                    onChange={() => onToggleMaterial(material.id)}
-                    className="mt-1 h-4 w-4 rounded border-slate-300 text-[#ea6a00] focus:ring-[#ea6a00]"
-                  />
-                  <span>
-                    <span className="block font-medium text-slate-800">
-                      {material.title}
-                    </span>
-                    <span className="mt-1 block font-mono text-xs text-slate-400">
-                      {material.id}
-                    </span>
-                  </span>
-                </label>
-              ))}
-            </div>
-          </div>
-
-          <div className="rounded-xl border border-slate-200 p-4">
-            <h3 className="mb-3 text-sm font-semibold text-slate-900">
-              Порядок в треке
-            </h3>
-            <div className="max-h-96 space-y-2 overflow-y-auto">
-              {selectedMaterials.map((material, index) => (
-                <div
-                  key={material.id}
-                  draggable
-                  onDragStart={(event) =>
-                    event.dataTransfer.setData("text/plain", String(index))
-                  }
-                  onDragOver={(event) => event.preventDefault()}
-                  onDrop={(event) => {
-                    event.preventDefault();
-                    onMoveMaterial(
-                      Number(event.dataTransfer.getData("text/plain")),
-                      index
-                    );
-                  }}
-                  className="flex items-start gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3"
-                >
-                  <GripVertical
-                    size={16}
-                    className="mt-1 shrink-0 text-slate-400"
-                  />
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium text-slate-800">
-                      {index + 1}. {material.title}
-                    </p>
-                    <p className="mt-1 font-mono text-xs text-slate-400">
-                      {material.id}
-                    </p>
-                  </div>
-                </div>
-              ))}
-              {selectedMaterials.length === 0 ? (
-                <p className="rounded-lg bg-slate-50 p-4 text-sm text-slate-500">
-                  Выберите материалы слева.
-                </p>
-              ) : null}
-            </div>
-          </div>
-        </div>
+        <TrackMaterialPicker materials={materials} selectedIds={selectedIds} onToggle={onToggleMaterial} onMove={onMoveMaterial} />
+      </div>
+      <TrackInfoEditor blocks={form.infoBlocks} materialIds={selectedIds} materials={materials} onChange={(infoBlocks) => onFormChange({ ...form, infoBlocks })} />
+      <div className="mt-4">
+        <TrackPreview track={{ ...form, id: "preview", materialIds: selectedIds, tags: splitList(form.tags), createdAt: new Date() }} materials={materials} />
       </div>
       <SubmitButton isSubmitting={isSubmitting} label="Добавить трек" />
     </form>
@@ -2185,8 +2156,8 @@ function ArchiveWorkspace({
   onModeChange: (mode: ArchiveMode) => void;
   onFilterChange: (filter: ArchiveFilter) => void;
   onSelect: (id: string | null) => void;
-  onUpdateMaterial: (id: string, payload: Partial<Material>) => Promise<void>;
-  onUpdateTrack: (id: string, payload: Partial<LearningTrack>) => Promise<void>;
+  onUpdateMaterial: (id: string, payload: Partial<Material>) => Promise<boolean>;
+  onUpdateTrack: (id: string, payload: Partial<LearningTrack>) => Promise<boolean>;
   onDelete: (collectionName: "materials" | "tracks", id: string) => Promise<void>;
 }) {
   const list =
@@ -2269,6 +2240,7 @@ function ArchiveWorkspace({
               </span>
               <span className="mt-1 block text-xs text-slate-400">
                 {formatDate(item.createdAt)} · {item.archived ? "архив" : "активно"}
+                {"hiddenFromLibrary" in item && item.hiddenFromLibrary ? " · скрыт из библиотеки" : ""}
               </span>
             </button>
           ))}
@@ -2277,12 +2249,14 @@ function ArchiveWorkspace({
       <section className="rounded-xl bg-white p-5 shadow-sm ring-1 ring-slate-200">
         {selectedMaterial ? (
           <MaterialEditor
+            key={selectedMaterial.id}
             material={selectedMaterial}
             onUpdate={onUpdateMaterial}
             onDelete={(id) => onDelete("materials", id)}
           />
         ) : selectedTrack ? (
           <TrackEditor
+            key={selectedTrack.id}
             track={selectedTrack}
             materials={materials}
             onUpdate={onUpdateTrack}
@@ -2304,10 +2278,11 @@ function MaterialEditor({
   onDelete
 }: {
   material: Material;
-  onUpdate: (id: string, payload: Partial<Material>) => Promise<void>;
+  onUpdate: (id: string, payload: Partial<Material>) => Promise<boolean>;
   onDelete: (id: string) => Promise<void>;
 }) {
   const [title, setTitle] = useState(material.title);
+  const [hiddenFromLibrary, setHiddenFromLibrary] = useState(material.hiddenFromLibrary ?? false);
   const [description, setDescription] = useState(material.description);
   const [tags, setTags] = useState((material.tags ?? []).join(", "));
   const [category, setCategory] = useState(material.category.join(", "));
@@ -2322,10 +2297,26 @@ function MaterialEditor({
   const [trendingStamp, setTrendingStamp] = useState<TrendingStamp | "">(
     material.trendingStamp ?? ""
   );
+  const navigate = useEditorNavigation();
+  const payload = { hiddenFromLibrary, title, description, url, testUrl, coverUrl, format,
+    category: splitList(category), tags: splitList(tags),
+    author: { name: speakerName, company: speakerCompany }, trendingStamp: trendingStamp || null };
+  const save = useEditorDraft(payload, () => onUpdate(material.id, payload), () => {
+    setTitle(material.title); setDescription(material.description); setUrl(material.url);
+    setHiddenFromLibrary(material.hiddenFromLibrary ?? false); setTestUrl(material.testUrl ?? "");
+    setCoverUrl(material.coverUrl ?? ""); setFormat(material.format);
+    setCategory(material.category.join(", ")); setTags((material.tags ?? []).join(", "));
+    setSpeakerName(material.author.name); setSpeakerCompany(material.author.company ?? "");
+    setTrendingStamp(material.trendingStamp ?? "");
+  });
 
   return (
     <div className="space-y-4">
       <EditorTitle id={material.id} archived={Boolean(material.archived)} />
+      <label className="flex items-center gap-2 text-sm text-slate-700">
+        <input type="checkbox" checked={hiddenFromLibrary} onChange={(event) => setHiddenFromLibrary(event.target.checked)} />
+        Скрывать из библиотеки
+      </label>
       <div className="grid gap-4 md:grid-cols-2">
         <TextField label="Название" value={title} onChange={setTitle} />
         <TextField label="Формат" value={format} onChange={setFormat} />
@@ -2381,27 +2372,9 @@ function MaterialEditor({
       </div>
       <EditorActions
         archived={Boolean(material.archived)}
-        onSave={() =>
-          onUpdate(material.id, {
-            title,
-            description,
-            url,
-            testUrl,
-            coverUrl,
-            format,
-            category: splitList(category),
-            tags: splitList(tags),
-            author: {
-              name: speakerName,
-              company: speakerCompany
-            },
-            trendingStamp: trendingStamp || null
-          })
-        }
-        onArchive={() =>
-          onUpdate(material.id, { archived: !material.archived })
-        }
-        onDelete={() => onDelete(material.id)}
+        onSave={() => void save()}
+        onArchive={() => navigate(() => void onUpdate(material.id, { archived: !material.archived }))}
+        onDelete={() => navigate(() => void onDelete(material.id))}
       />
     </div>
   );
@@ -2415,7 +2388,7 @@ function TrackEditor({
 }: {
   track: LearningTrack;
   materials: Material[];
-  onUpdate: (id: string, payload: Partial<LearningTrack>) => Promise<void>;
+  onUpdate: (id: string, payload: Partial<LearningTrack>) => Promise<boolean>;
   onDelete: (id: string) => Promise<void>;
 }) {
   const [title, setTitle] = useState(track.title);
@@ -2424,6 +2397,14 @@ function TrackEditor({
   const [coverUrl, setCoverUrl] = useState(track.coverUrl ?? "");
   const [testUrl, setTestUrl] = useState(track.testUrl ?? "");
   const [selectedIds, setSelectedIds] = useState(track.materialIds);
+  const [infoBlocks, setInfoBlocks] = useState(track.infoBlocks ?? []);
+  const navigate = useEditorNavigation();
+  const payload = { title, description, coverUrl, testUrl, tags: splitList(tags), materialIds: selectedIds, infoBlocks };
+  const save = useEditorDraft(payload, () => onUpdate(track.id, payload), () => {
+    setTitle(track.title); setDescription(track.description); setCoverUrl(track.coverUrl ?? "");
+    setTestUrl(track.testUrl ?? ""); setTags((track.tags ?? []).join(", "));
+    setSelectedIds(track.materialIds); setInfoBlocks(track.infoBlocks ?? []);
+  });
 
   function toggleMaterial(id: string) {
     setSelectedIds((current) =>
@@ -2470,105 +2451,18 @@ function TrackEditor({
         onToggle={toggleMaterial}
         onMove={moveMaterial}
       />
+      <TrackInfoEditor blocks={infoBlocks} materialIds={selectedIds} materials={materials} onChange={setInfoBlocks} />
+      <TrackPreview track={{ ...track, ...payload }} materials={materials} />
       <EditorActions
         archived={Boolean(track.archived)}
-        onSave={() =>
-          onUpdate(track.id, {
-            title,
-            description,
-            coverUrl,
-            testUrl,
-            tags: splitList(tags),
-            materialIds: selectedIds
-          })
-        }
-        onArchive={() => onUpdate(track.id, { archived: !track.archived })}
-        onDelete={() => onDelete(track.id)}
+        onSave={() => void save()}
+        onArchive={() => navigate(() => void onUpdate(track.id, { archived: !track.archived }))}
+        onDelete={() => navigate(() => void onDelete(track.id))}
       />
     </div>
   );
 }
 
-function TrackMaterialPicker({
-  materials,
-  selectedIds,
-  onToggle,
-  onMove
-}: {
-  materials: Material[];
-  selectedIds: string[];
-  onToggle: (id: string) => void;
-  onMove: (from: number, to: number) => void;
-}) {
-  const selectedMaterials = selectedIds
-    .map((id) => materials.find((material) => material.id === id))
-    .filter((material): material is Material => Boolean(material));
-
-  return (
-    <div className="grid gap-4 lg:grid-cols-2">
-      <div className="rounded-xl border border-slate-200 p-4">
-        <h3 className="mb-3 text-sm font-semibold text-slate-900">
-          Материалы платформы
-        </h3>
-        <div className="max-h-80 space-y-2 overflow-y-auto">
-          {materials.map((material) => (
-            <label
-              key={material.id}
-              className="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 bg-white p-3 text-sm hover:bg-slate-50"
-            >
-              <input
-                type="checkbox"
-                checked={selectedIds.includes(material.id)}
-                onChange={() => onToggle(material.id)}
-                className="mt-1 h-4 w-4 rounded border-slate-300 text-[#ea6a00] focus:ring-[#ea6a00]"
-              />
-              <span>
-                <span className="block font-medium text-slate-800">
-                  {material.title}
-                </span>
-                <span className="mt-1 block font-mono text-xs text-slate-400">
-                  {material.id}
-                </span>
-              </span>
-            </label>
-          ))}
-        </div>
-      </div>
-      <div className="rounded-xl border border-slate-200 p-4">
-        <h3 className="mb-3 text-sm font-semibold text-slate-900">
-          Порядок в треке
-        </h3>
-        <div className="max-h-80 space-y-2 overflow-y-auto">
-          {selectedMaterials.map((material, index) => (
-            <div
-              key={material.id}
-              draggable
-              onDragStart={(event) =>
-                event.dataTransfer.setData("text/plain", String(index))
-              }
-              onDragOver={(event) => event.preventDefault()}
-              onDrop={(event) => {
-                event.preventDefault();
-                onMove(Number(event.dataTransfer.getData("text/plain")), index);
-              }}
-              className="flex items-start gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3"
-            >
-              <GripVertical size={16} className="mt-1 shrink-0 text-slate-400" />
-              <div className="min-w-0">
-                <p className="text-sm font-medium text-slate-800">
-                  {index + 1}. {material.title}
-                </p>
-                <p className="mt-1 font-mono text-xs text-slate-400">
-                  {material.id}
-                </p>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
 
 function FormHeader({ title, onBack }: { title: string; onBack: () => void }) {
   return (

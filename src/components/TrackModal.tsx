@@ -1,6 +1,7 @@
 "use client";
 
-import { CheckCircle2, ExternalLink, LockKeyhole, Share2, X } from "lucide-react";
+import { CheckCircle2, ExternalLink, FileText, Info, LockKeyhole, Share2, X } from "lucide-react";
+import { getTrackEntries } from "@/lib/track-content";
 import type { LearningTrack, Material } from "@/types/material";
 
 type TrackModalProps = {
@@ -10,6 +11,7 @@ type TrackModalProps = {
   onClose: () => void;
   onOpenMaterial: (material: Material) => void;
   onOpenTest?: (url: string) => void;
+  preview?: boolean;
 };
 
 async function shareLink(url: string, title: string) {
@@ -27,7 +29,8 @@ export function TrackModal({
   completedMaterialIds,
   onClose,
   onOpenMaterial,
-  onOpenTest
+  onOpenTest,
+  preview = false
 }: TrackModalProps) {
   if (!track) {
     return null;
@@ -53,7 +56,7 @@ export function TrackModal({
         <div className="flex shrink-0 items-start justify-between gap-3 border-b border-slate-100 p-4 sm:gap-4 sm:p-5">
           <div className="min-w-0">
             <p className="mb-1 text-sm font-medium text-orange-600">
-              Обучающий трек
+              {preview ? "Предпросмотр · Обучающий трек" : "Обучающий трек"}
             </p>
             <h2 className="line-clamp-3 text-xl font-semibold leading-tight text-slate-950 sm:line-clamp-none">
               {track.title}
@@ -74,7 +77,26 @@ export function TrackModal({
 
         <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-5">
           <div className="space-y-3">
-            {orderedMaterials.map((material, index) => {
+            {getTrackEntries(track, materials).map((entry) => {
+              if (entry.kind === "info") {
+                return (
+                  <aside key={`info-${entry.block.id}`} className="flex gap-3 rounded-lg border border-orange-200 bg-orange-50 p-4">
+                    <Info size={24} className="shrink-0 text-orange-600" />
+                    <div className="min-w-0 flex-1 break-words">
+                      <h3 className="text-sm font-semibold text-slate-950">{entry.block.title}</h3>
+                      <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-slate-600">
+                        {entry.block.text.split(/(https?:\/\/[^\s<>]+)/g).map((part, index) =>
+                          /^https?:\/\//.test(part) ? (
+                            <a key={index} href={part} target="_blank" rel="noopener noreferrer" className="break-all text-orange-700 underline">{part}</a>
+                          ) : part
+                        )}
+                      </p>
+                    </div>
+                  </aside>
+                );
+              }
+              const { material } = entry;
+              const index = orderedMaterials.findIndex((item) => item.id === material.id);
               const isCompleted = completedMaterialIds.has(material.id);
 
               return (
@@ -82,16 +104,20 @@ export function TrackModal({
                   key={material.id}
                   type="button"
                   onClick={() => onOpenMaterial(material)}
-                  className={`flex w-full items-start gap-3 rounded-xl border p-3 text-left transition hover:border-[#ea6a00]/30 hover:bg-orange-50 sm:gap-4 sm:p-4 ${
-                    isCompleted
-                      ? "border-emerald-100 bg-emerald-50/50 opacity-75 saturate-50"
-                      : "border-slate-200 bg-white"
+                  className={`flex w-full items-start gap-3 rounded-lg border p-3 text-left transition hover:border-[#ea6a00]/30 hover:bg-orange-50 sm:gap-4 sm:p-4 ${
+                    material.type === "file"
+                      ? `border-orange-200 bg-orange-50 ${isCompleted ? "opacity-75" : ""}`
+                      : isCompleted
+                        ? "border-emerald-100 bg-emerald-50/50 opacity-75 saturate-50"
+                        : "border-slate-200 bg-white"
                   }`}
                 >
                   <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#ea6a00] text-sm font-semibold text-white">
                     {index + 1}
                   </span>
+                  {material.type === "file" ? <FileText size={28} className="shrink-0 text-orange-500" /> : null}
                   <span className="min-w-0 flex-1">
+                    {material.type === "file" ? <span className="mb-1 block text-xs font-medium text-orange-700">Материал для скачивания</span> : null}
                     <span className="line-clamp-2 block text-sm font-semibold text-slate-950">
                       {material.title}
                     </span>
@@ -113,7 +139,6 @@ export function TrackModal({
 
         <div className="flex shrink-0 flex-col gap-3 border-t border-slate-100 p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
           <div className="min-w-0">
-            <p className="truncate text-xs text-slate-400">{shareUrl}</p>
             <p className="mt-1 text-xs font-medium text-slate-500">
               Завершено материалов: {completedCount} из {orderedMaterials.length}
             </p>
@@ -138,14 +163,14 @@ export function TrackModal({
                 Перейти к тестированию
               </button>
             ) : null}
-            <button
+            {!preview ? <button
               type="button"
               onClick={() => void shareLink(shareUrl, track.title)}
               className="inline-flex min-h-12 items-center justify-center gap-2 rounded-lg border border-slate-200 px-4 py-2.5 text-sm font-medium text-slate-700 transition hover:border-[#ea6a00]/30 hover:bg-orange-50 hover:text-[#ea6a00] sm:min-h-0"
             >
               <Share2 size={16} />
               Поделиться
-            </button>
+            </button> : null}
           </div>
         </div>
       </div>

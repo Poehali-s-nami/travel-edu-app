@@ -154,8 +154,7 @@ export function ContentModal({
               </span>
             ))}
           </div>
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <p className="truncate text-xs text-slate-400">{shareUrl}</p>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-end">
             <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
               <button
                 type="button"
