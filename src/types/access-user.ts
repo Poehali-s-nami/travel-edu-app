@@ -6,6 +6,7 @@ export type AccessUser = {
   login: string;
   normalizedLogin: string;
   displayName: string;
+  office?: string;
   email?: string;
   phone?: string;
   role: AccessUserRole;
@@ -14,6 +15,8 @@ export type AccessUser = {
   manual?: boolean;
   source?: "crm" | "manual";
   passwordResetRequested?: boolean;
+  passwordPolicyVersion?: number;
+  passwordChangedAt?: Date;
   createdAt: Date;
   updatedAt?: Date;
   lastLoginAt?: Date;

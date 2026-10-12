@@ -1,6 +1,19 @@
 import type { LearningTrack, Material } from "@/types/material";
 
-export const durationOptions = ["До 15 минут", "15-45 минут", "45+ минут"];
+export const durationOptions = ["До 15 минут", "15-45 минут", "45-90 минут", "Более 90 минут"];
+export const videoFormats = ["Вебинар", "Видеоурок", "Практический разбор", "Инструкция"] as const;
+
+export function videoFormat(format: string) {
+  return format.trim() || "Вебинар";
+}
+
+export function normalizeCategory(value: string) {
+  return value.normalize("NFKC").trim().replace(/\s+/g, " ");
+}
+
+export function categoryKey(value: string) {
+  return normalizeCategory(value).toLocaleLowerCase("ru");
+}
 
 const webinarCovers = [
   "https://images.unsplash.com/photo-1500530855697-b586d89ba3ee?auto=format&fit=crop&w=1200&q=80",
@@ -332,7 +345,7 @@ export function uniqueSorted(values: string[]) {
 }
 
 export function getDurationBucket(duration: number) {
-  if (duration < 15) {
+  if (duration <= 15) {
     return "До 15 минут";
   }
 
@@ -340,7 +353,11 @@ export function getDurationBucket(duration: number) {
     return "15-45 минут";
   }
 
-  return "45+ минут";
+  if (duration <= 90) {
+    return "45-90 минут";
+  }
+
+  return "Более 90 минут";
 }
 
 export function formatDate(date: Date) {

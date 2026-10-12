@@ -45,10 +45,10 @@ function getLoginErrorMessage(status: LoginStatus) {
   }
 
   if (status === "active" || status === "admin") {
-    return "Код доступа или пароль неверный. Проверьте актуальный код в CRM.";
+    return "Пароль неверный. Проверьте введенные данные.";
   }
 
-  return "Не удалось войти. Проверьте логин и актуальный код доступа.";
+  return "Не удалось войти. Проверьте логин и пароль.";
 }
 
 export function UserLogin() {
@@ -130,19 +130,19 @@ export function UserLogin() {
                   role="tooltip"
                   className="pointer-events-none absolute bottom-[calc(100%+0.5rem)] right-0 z-20 w-72 rounded-md bg-[#0b182f] px-3 py-2 text-left text-xs font-normal leading-5 text-white opacity-0 shadow-lg transition-opacity duration-200 group-hover:opacity-100 group-focus:opacity-100"
                 >
-                  Введите логин, который вы используете в CRM, и актуальный код
-                  в качестве пароля.
+                  Введите логин из CRM и свой личный пароль. При первом входе
+                  используйте первоначальный пароль, который выдал администратор.
                 </span>
               </span>
             </label>
 
             <label className="relative block border-b-2 border-[#E5E7EB] transition-all duration-300 focus-within:border-[#F26522] focus-within:shadow-[0_7px_10px_-9px_rgba(242,101,34,0.9)]">
-              <span className="sr-only">Код доступа или пароль администратора</span>
+              <span className="sr-only">Пароль</span>
               <input
                 type={showPassword ? "text" : "password"}
                 value={password}
                 onChange={(event) => setPassword(event.target.value)}
-                placeholder="Код"
+                placeholder="Пароль"
                 autoComplete="current-password"
                 required
                 className="w-full bg-transparent py-3 pl-0 pr-12 text-base text-[#0b182f] caret-[#F26522] outline-none placeholder:text-gray-400"
@@ -150,7 +150,7 @@ export function UserLogin() {
               <button
                 type="button"
                 onClick={() => setShowPassword((current) => !current)}
-                aria-label={showPassword ? "Скрыть код" : "Показать код"}
+                aria-label={showPassword ? "Скрыть пароль" : "Показать пароль"}
                 className="absolute right-0 top-1/2 flex h-9 w-9 -translate-y-1/2 items-center justify-center text-slate-400 transition hover:text-[#0b182f] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F26522]"
               >
                 {showPassword ? <EyeOff size={18} /> : <Eye size={18} />}
@@ -182,7 +182,7 @@ export function UserLogin() {
               aria-expanded={showHelp}
               className="inline-flex items-center justify-center gap-1.5 text-sm font-semibold text-[#F26522] transition hover:text-[#dc5518] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F26522] focus-visible:ring-offset-4"
             >
-              Не получается войти
+              Забыли пароль?
               <ChevronDown
                 size={16}
                 className={`transition-transform duration-200 ${showHelp ? "rotate-180" : ""}`}
@@ -193,11 +193,10 @@ export function UserLogin() {
             {showHelp ? (
               <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4 text-left text-sm leading-6 text-slate-500 shadow-sm">
                 <p className="mt-1">
-                  Проверьте написание логина либо имени и фамилии, а также
-                  актуальный код доступа и статус в CRM. Возможно, ваш аккаунт
-                  был приостановлен. Код доступа находится в актуальной новости
-                  в CRM. Если доступ нужен срочно, обратитесь к администратору:
-                  psnkzeducation@gmail.com, +7 708 491 4880.
+                  Обратитесь к администратору PSN HUB: Лешиной Анастасии.
+                  Она назначит временный пароль. После входа вы создадите новый
+                  личный пароль. Контакты: psnkzeducation@gmail.com,
+                  +7 708 491 4880.
                 </p>
               </div>
             ) : null}

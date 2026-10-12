@@ -6,6 +6,7 @@ type ImportUser = {
   crmId?: string;
   login: string;
   displayName: string;
+  office?: string;
   email?: string;
   phone?: string;
   active: boolean;
@@ -17,6 +18,7 @@ type ImportRequest = {
   accessCode?: string;
   archiveMissing?: boolean;
   allCrmIds?: string[];
+  allUserKeys?: string[];
   users?: ImportUser[];
 };
 
@@ -238,18 +240,22 @@ async function upsertAuthUser(
   authEmail: string,
   accessCode: string,
   displayName: string,
-  disabled: boolean
+  disabled: boolean,
+  setTemporaryPassword: boolean
 ) {
   const existingById = await findAuthUserById(token, uid);
 
   if (existingById) {
-    await identityToolkit(token, "update", {
+    const update: Record<string, unknown> = {
       localId: existingById,
       email: authEmail,
-      password: accessCode,
       displayName,
       disabled,
       emailVerified: true
+    };
+    if (setTemporaryPassword) update.password = accessCode;
+    await identityToolkit(token, "update", {
+      ...update
     });
     return { uid: existingById, created: false };
   }
@@ -257,12 +263,15 @@ async function upsertAuthUser(
   const existingByEmail = await findAuthUserByEmail(token, authEmail);
 
   if (existingByEmail) {
-    await identityToolkit(token, "update", {
+    const update: Record<string, unknown> = {
       localId: existingByEmail,
-      password: accessCode,
       displayName,
       disabled,
       emailVerified: true
+    };
+    if (setTemporaryPassword) update.password = accessCode;
+    await identityToolkit(token, "update", {
+      ...update
     });
     return { uid: existingByEmail, created: false };
   }
@@ -308,13 +317,19 @@ async function commitFirestoreWrites(
   }
 }
 
-function accessUserWrite(uid: string, user: ImportUser) {
+function accessUserWrite(
+  uid: string,
+  user: ImportUser,
+  passwordResetRequested: boolean,
+  passwordPolicyVersion: number
+) {
   const normalizedLogin = normalizeLogin(user.login);
   const fields = {
     crmId: firestoreValue(user.crmId),
     login: firestoreValue(user.login),
     normalizedLogin: firestoreValue(normalizedLogin),
     displayName: firestoreValue(user.displayName || user.login),
+    office: firestoreValue(user.office ?? ""),
     email: firestoreValue(user.email ?? ""),
     phone: firestoreValue(user.phone ?? ""),
     role: firestoreValue("user"),
@@ -322,7 +337,8 @@ function accessUserWrite(uid: string, user: ImportUser) {
     archived: firestoreValue(!user.active),
     manual: firestoreValue(false),
     source: firestoreValue("crm"),
-    passwordResetRequested: firestoreValue(false),
+    passwordResetRequested: firestoreValue(passwordResetRequested),
+    passwordPolicyVersion: firestoreValue(passwordPolicyVersion),
     updatedAt: { timestampValue: new Date().toISOString() }
   };
 
@@ -343,6 +359,9 @@ type AccessUserRecord = {
   crmId: string;
   normalizedLogin: string;
   email: string;
+  source: string;
+  passwordResetRequested: boolean;
+  passwordPolicyVersion: number;
 };
 
 async function listAccessUsers(token: string) {
@@ -371,6 +390,10 @@ async function listAccessUsers(token: string) {
           crmId?: { stringValue?: string };
           normalizedLogin?: { stringValue?: string };
           email?: { stringValue?: string };
+          source?: { stringValue?: string };
+          manual?: { booleanValue?: boolean };
+          passwordResetRequested?: { booleanValue?: boolean };
+          passwordPolicyVersion?: { integerValue?: string };
         };
       }>;
       nextPageToken?: string;
@@ -383,7 +406,15 @@ async function listAccessUsers(token: string) {
         uid: fallbackId,
         crmId: document.fields?.crmId?.stringValue ?? fallbackId,
         normalizedLogin: document.fields?.normalizedLogin?.stringValue ?? "",
-        email: (document.fields?.email?.stringValue ?? "").toLowerCase()
+        email: (document.fields?.email?.stringValue ?? "").toLowerCase(),
+        source:
+          document.fields?.source?.stringValue ??
+          (document.fields?.manual?.booleanValue ? "manual" : "crm"),
+        passwordResetRequested:
+          document.fields?.passwordResetRequested?.booleanValue === true,
+        passwordPolicyVersion: Number(
+          document.fields?.passwordPolicyVersion?.integerValue ?? 0
+        )
       });
     }
 
@@ -408,8 +439,17 @@ async function resolveImportIdentity(
 
   return {
     uid: existing?.uid || crmId,
-    crmId
+    crmId,
+    existing
   };
+}
+
+function getUserKeys(user: Pick<AccessUserRecord, "crmId" | "normalizedLogin" | "email">) {
+  return [
+    user.crmId ? `crm:${user.crmId.trim()}` : "",
+    user.normalizedLogin ? `login:${user.normalizedLogin}` : "",
+    user.email ? `email:${user.email.trim().toLowerCase()}` : ""
+  ].filter(Boolean);
 }
 
 function archiveWrite(documentName: string) {
@@ -438,9 +478,7 @@ export async function POST(request: NextRequest) {
     }
 
     const inputUsers = Array.isArray(body.users) ? body.users : [];
-    const validUsers = inputUsers.filter(
-      (user) => user.login && user.isBlocked !== true
-    );
+    const validUsers = inputUsers.filter((user) => user.login);
 
     if (!validUsers.length) {
       return json({ message: "В файле нет пользователей для импорта." }, 400);
@@ -466,14 +504,25 @@ export async function POST(request: NextRequest) {
         continue;
       }
 
+      if (user.isBlocked && !identity.existing) {
+        skipped += 1;
+        importedCrmIds.add(crmId);
+        importedLogins.add(normalizedLogin);
+        continue;
+      }
+
       const authEmail = await loginToEmail(user.login);
+      const needsPasswordMigration =
+        user.active &&
+        (!identity.existing || identity.existing.passwordPolicyVersion < 1);
       const result = await upsertAuthUser(
         accessToken,
         identity.uid,
         authEmail,
         body.accessCode.trim(),
         user.displayName || user.login,
-        !user.active
+        !user.active,
+        needsPasswordMigration
       );
 
       if (result.created) created += 1;
@@ -481,7 +530,16 @@ export async function POST(request: NextRequest) {
 
       importedCrmIds.add(crmId);
       importedLogins.add(normalizedLogin);
-      writes.push(accessUserWrite(result.uid, { ...user, crmId }));
+      writes.push(
+        accessUserWrite(
+          result.uid,
+          { ...user, crmId },
+          needsPasswordMigration
+            ? true
+            : identity.existing?.passwordResetRequested ?? false,
+          Math.max(identity.existing?.passwordPolicyVersion ?? 0, needsPasswordMigration ? 1 : 0)
+        )
+      );
 
       if (writes.length >= 400) {
         await commitFirestoreWrites(accessToken, writes.splice(0));
@@ -489,16 +547,23 @@ export async function POST(request: NextRequest) {
     }
 
     if (body.archiveMissing) {
-      const archiveCrmIds = new Set(
-        (Array.isArray(body.allCrmIds) && body.allCrmIds.length
-          ? body.allCrmIds
-          : Array.from(importedCrmIds)
-        )
-          .map((crmId) => crmId.trim())
-          .filter(Boolean)
+      const suppliedKeys = Array.isArray(body.allUserKeys)
+        ? body.allUserKeys.map((key) => key.trim()).filter(Boolean)
+        : [];
+      const presentUserKeys = new Set(
+        suppliedKeys.length
+          ? suppliedKeys
+          : (Array.isArray(body.allCrmIds) && body.allCrmIds.length
+              ? body.allCrmIds
+              : Array.from(importedCrmIds)
+            )
+              .map((crmId) => crmId.trim())
+              .filter(Boolean)
+              .map((crmId) => `crm:${crmId}`)
       );
       for (const user of existingAccessUsers) {
-        if (!archiveCrmIds.has(user.crmId)) {
+        const remainsInCrm = getUserKeys(user).some((key) => presentUserKeys.has(key));
+        if (user.source !== "manual" && !remainsInCrm) {
           writes.push(archiveWrite(user.name));
         }
 

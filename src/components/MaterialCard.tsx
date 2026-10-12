@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import Image from "next/image";
 import type { Material } from "@/types/material";
+import { videoFormat } from "@/lib/materials";
 
 type MaterialCardProps = {
   material: Material;
@@ -24,7 +25,9 @@ export function MaterialCard({
   onOpen
 }: MaterialCardProps) {
   const CoverIcon = material.type === "video" ? Play : FileText;
-  const visibleTags = [...material.category, ...(material.tags ?? [])].slice(0, 4);
+  const visibleTags = material.tab === "webinars"
+    ? [...material.category.slice(0, 2), ...(material.tags ?? []).slice(0, 2)]
+    : [...material.category, ...(material.tags ?? [])].slice(0, 4);
 
   return (
     <button
@@ -71,6 +74,9 @@ export function MaterialCard({
       </div>
 
       <div className="flex flex-1 flex-col gap-4 p-5">
+        {material.tab === "webinars" ? (
+          <span className="text-xs font-semibold text-[#b85300]">{videoFormat(material.format)}</span>
+        ) : null}
         <div className="flex min-h-14 content-start flex-wrap gap-2">
           {visibleTags.map((tag) => (
             <span
@@ -93,12 +99,12 @@ export function MaterialCard({
 
         <div className="mt-auto flex min-h-[4.25rem] items-center justify-between gap-3 border-t border-slate-100 pt-4">
           <div className="min-w-0 space-y-1">
-            {material.tab === "webinars" ? (
+            {material.tab === "webinars" && (material.author.name || material.author.company) ? (
               <>
-                <p className="flex items-center gap-1 truncate text-sm font-medium text-slate-800">
+                {material.author.name ? <p className="flex items-center gap-1 truncate text-sm font-medium text-slate-800">
                   <UserRound size={14} />
-                  {material.author.name || "Спикер не указан"}
-                </p>
+                  {material.author.name}
+                </p> : null}
                 {material.author.company ? (
                   <p className="flex items-center gap-1 truncate text-xs text-slate-400">
                     <Building2 size={13} />
@@ -118,10 +124,10 @@ export function MaterialCard({
               <Clock3 size={13} />
               {material.duration} мин
             </span>
-            {material.tab === "webinars" ? (
+            {material.tab === "webinars" && material.views !== undefined ? (
               <span className="flex items-center gap-1 text-xs font-medium text-slate-400">
                 <Eye size={13} />
-                {material.views ?? 0}
+                {material.views}
               </span>
             ) : null}
           </div>

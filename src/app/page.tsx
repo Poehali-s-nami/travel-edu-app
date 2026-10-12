@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  getIdTokenResult,
   getRedirectResult,
   onAuthStateChanged,
   signOut,
@@ -24,6 +25,7 @@ import {
 import {
   BookOpen,
   CalendarDays,
+  Crown,
   ExternalLink,
   FolderOpen,
   GraduationCap,
@@ -33,9 +35,11 @@ import {
   Phone,
   Search,
   ShieldCheck,
+  UserRound,
   X
 } from "lucide-react";
 import Image from "next/image";
+import Link from "next/link";
 import { AdminForm } from "@/components/AdminForm";
 import { ContentModal } from "@/components/ContentModal";
 import {
@@ -46,13 +50,16 @@ import { MaterialCard } from "@/components/MaterialCard";
 import { TrackCard } from "@/components/TrackCard";
 import { TrackModal } from "@/components/TrackModal";
 import { UserLogin } from "@/components/UserLogin";
+import { PasswordChangeGate } from "@/components/PasswordChangeGate";
 import { ADMIN_EMAIL, auth, db } from "@/lib/firebase";
 import {
   demoMaterials,
   demoTracks,
   durationOptions,
   getSpeakerCompanyLabel,
-  uniqueSorted
+  uniqueSorted,
+  videoFormat,
+  videoFormats
 } from "@/lib/materials";
 import type {
   ContentTab,
@@ -64,7 +71,8 @@ import type { AccessUser } from "@/types/access-user";
 
 const PAGE_SIZE = 12;
 const MIN_DEMO_ITEMS_PER_SECTION = 6;
-const CALENDAR_URL = "https://learningagenda.netlify.app/";
+const CALENDAR_URL =
+  process.env.NEXT_PUBLIC_CALENDAR_URL ?? "https://learningagenda.netlify.app/";
 const SESSION_DURATION_MS = 12 * 60 * 60 * 1000;
 
 type AppTab = ContentTab | "calendar";
@@ -78,7 +86,7 @@ const emptyFilters: FilterState = {
 
 const tabs: Array<{ id: AppTab; label: string; icon: typeof GraduationCap }> =
   [
-    { id: "webinars", label: "Библиотека вебинаров", icon: GraduationCap },
+    { id: "webinars", label: "Видеотека", icon: GraduationCap },
     { id: "knowledge", label: "База знаний", icon: BookOpen },
     { id: "tracks", label: "Обучающий трек", icon: FolderOpen },
     { id: "calendar", label: "Календарь", icon: CalendarDays }
@@ -129,9 +137,13 @@ export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [accessUser, setAccessUser] = useState<AccessUser | null>(null);
   const [isAuthLoading, setIsAuthLoading] = useState(true);
+  const [isImpersonating, setIsImpersonating] = useState(false);
   const [isAccessLoading, setIsAccessLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
+  const [videoFormatFilter, setVideoFormatFilter] = useState("Все видео");
+  const [videoSort, setVideoSort] = useState("newest");
+  const [videoCategories, setVideoCategories] = useState<string[]>([]);
 
   useEffect(() => {
     if (!auth) {
@@ -156,11 +168,25 @@ export default function Home() {
         setIsAdminOpen(true);
       });
 
-    return onAuthStateChanged(auth, (nextUser) => {
+    let active = true;
+    let authRevision = 0;
+    const unsubscribe = onAuthStateChanged(auth, (nextUser) => {
+      const revision = ++authRevision;
       setUser(nextUser);
       setIsAuthLoading(false);
+      if (nextUser?.email !== ADMIN_EMAIL) setIsAccessLoading(Boolean(nextUser));
+
+      if (nextUser) {
+        void getIdTokenResult(nextUser)
+          .then((token) => {
+            if (active && revision === authRevision) setIsImpersonating(token.claims.psnImpersonation === true);
+          })
+          .catch(() => { if (active && revision === authRevision) setIsImpersonating(false); });
+      }
 
       if (!nextUser) {
+        setIsAuthLoading(false);
+        setIsImpersonating(false);
         setAccessUser(null);
         setIsAccessLoading(false);
         window.localStorage.removeItem("travel-edu-session-start");
@@ -178,11 +204,19 @@ export default function Home() {
         window.sessionStorage.removeItem("travelEduAdminLogin");
       }
     });
+    return () => { active = false; unsubscribe(); };
   }, []);
 
   const isAdmin = user?.email === ADMIN_EMAIL;
   const hasAccess =
     isAdmin || Boolean(accessUser?.active && !accessUser.archived);
+
+  useEffect(() => {
+    if (!db || !hasAccess) return;
+    return onSnapshot(collection(db, "videoCategories"), (snapshot) => {
+      setVideoCategories(uniqueSorted(snapshot.docs.map((item) => String(item.data().name ?? ""))));
+    }, () => setVideoCategories([]));
+  }, [hasAccess]);
 
   useEffect(() => {
     if (!user) {
@@ -221,6 +255,7 @@ export default function Home() {
           login: data.login ?? "",
           normalizedLogin: data.normalizedLogin ?? "",
           displayName: data.displayName ?? data.login ?? "Пользователь",
+          office: data.office ?? "",
           email: data.email ?? "",
           phone: data.phone ?? "",
           role: data.role ?? "user",
@@ -229,6 +264,8 @@ export default function Home() {
           manual: data.manual === true,
           source: data.source ?? "crm",
           passwordResetRequested: data.passwordResetRequested === true,
+          passwordPolicyVersion: Number(data.passwordPolicyVersion ?? 0),
+          passwordChangedAt: toDate(data.passwordChangedAt),
           createdAt: toDate(data.createdAt) ?? new Date(),
           updatedAt: toDate(data.updatedAt),
           lastLoginAt: toDate(data.lastLoginAt)
@@ -333,7 +370,7 @@ export default function Home() {
           const createdAt =
             data.createdAt instanceof Timestamp
               ? data.createdAt.toDate()
-              : new Date();
+              : new Date(0);
 
           return {
             id: doc.id,
@@ -344,7 +381,7 @@ export default function Home() {
             coverUrl: data.coverUrl ?? "",
             category: data.category ?? [],
             tags: data.tags ?? [],
-            format: data.format ?? "Документ",
+            format: data.format ?? (data.tab === "webinars" || data.type === "video" ? "Вебинар" : "Документ"),
             author: {
               name: data.author?.name ?? "",
               company: data.author?.company ?? ""
@@ -352,7 +389,7 @@ export default function Home() {
             duration: Number(data.duration ?? 0),
             trendingStamp: data.trendingStamp || undefined,
             hiddenFromLibrary: data.hiddenFromLibrary === true,
-            views: Number(data.views ?? 0),
+            views: typeof data.views === "number" ? data.views : undefined,
             testUrl: data.testUrl ?? "",
             createdAt,
             tab: data.tab ?? (data.type === "video" ? "webinars" : "knowledge"),
@@ -456,6 +493,7 @@ export default function Home() {
   function handleTabChange(tab: AppTab) {
     setActiveTab(tab);
     setFilters(emptyFilters);
+    setVideoFormatFilter("Все видео");
     setIsFilterOpen(false);
     setPage(1);
   }
@@ -596,14 +634,14 @@ export default function Home() {
   const topicOptions = useMemo(
     () => ({
       webinars: uniqueSorted(
-        materialsByTab.webinars.flatMap((material) => material.category)
+        [...videoCategories, ...materialsByTab.webinars.flatMap((material) => material.category)]
       ),
       knowledge: uniqueSorted(
         materialsByTab.knowledge.flatMap((material) => material.category)
       ),
       tracks: []
     }),
-    [materialsByTab]
+    [materialsByTab, videoCategories]
   );
 
   const knowledgeFormatOptions = useMemo(
@@ -643,11 +681,8 @@ export default function Home() {
     const filteredMaterials = filterMaterials(tabMaterials, filters, activeTab);
     const normalizedSearch = search.trim().toLowerCase();
 
-    if (!normalizedSearch) {
-      return filteredMaterials;
-    }
-
-    return filteredMaterials.filter((material) => {
+    const searched = filteredMaterials.filter((material) => {
+      if (!normalizedSearch) return true;
       const searchable = [
         material.title,
         material.description,
@@ -662,7 +697,16 @@ export default function Home() {
 
       return searchable.includes(normalizedSearch);
     });
-  }, [activeTab, filters, materialsByTab, search]);
+    if (activeTab !== "webinars") return searched;
+    return searched
+      .filter((material) => videoFormatFilter === "Все видео" || videoFormat(material.format) === videoFormatFilter)
+      .sort((a, b) => {
+        if (videoSort === "oldest") return a.createdAt.getTime() - b.createdAt.getTime();
+        if (videoSort === "views") return (b.views ?? 0) - (a.views ?? 0);
+        if (videoSort === "duration") return b.duration - a.duration;
+        return b.createdAt.getTime() - a.createdAt.getTime();
+      });
+  }, [activeTab, filters, materialsByTab, search, videoFormatFilter, videoSort]);
 
   const visibleTracks = useMemo(() => {
     if (activeTab !== "tracks") {
@@ -751,19 +795,37 @@ export default function Home() {
           <button
             type="button"
             onClick={() => auth && void signOut(auth)}
-            className="mt-6 rounded-lg border border-slate-200 px-4 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
+            aria-label="Выйти из аккаунта"
+            title="Выйти"
+            className="mt-6 inline-flex h-11 w-11 items-center justify-center rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50"
           >
-            Выйти
+            <LogOut size={19} />
           </button>
         </section>
       </main>
     );
   }
 
+  if (!isAdmin && accessUser?.passwordResetRequested) {
+    return (
+      <PasswordChangeGate
+        user={user}
+        displayName={accessUser.displayName}
+        onSignOut={() => auth && void signOut(auth)}
+      />
+    );
+  }
+
   return (
     <main className="min-h-screen bg-slate-50">
+      {isImpersonating ? (
+        <div className="border-b border-orange-200 bg-orange-50 px-4 py-2 text-center text-sm text-slate-800">
+          Вы вошли как {accessUser?.login || "сотрудник"} через администратора. Действия сохраняются от имени сотрудника.
+          <button type="button" onClick={() => auth && void signOut(auth)} className="ml-2 font-semibold text-[#c95b00] underline">Завершить сеанс</button>
+        </div>
+      ) : null}
       <div className="mx-auto max-w-[1500px] px-4 py-6 sm:px-6 lg:px-8 lg:py-10">
-        <header className="mb-6 flex flex-wrap items-center gap-3 rounded-xl bg-white px-4 py-3 shadow-sm ring-1 ring-slate-200/70 sm:px-5 lg:grid lg:grid-cols-[10rem_minmax(0,1fr)_10rem]">
+        <header className="mb-6 flex flex-wrap items-center gap-3 rounded-xl bg-white px-4 py-3 shadow-sm ring-1 ring-slate-200/70 sm:px-5 lg:grid lg:grid-cols-[10rem_minmax(0,1fr)_auto]">
           <Image
             src="/psn-logo.svg"
             alt="Поехали с нами"
@@ -799,25 +861,26 @@ export default function Home() {
             })}
           </nav>
 
-          <button
-            type="button"
-            onClick={() =>
-              isAdmin ? setIsAdminOpen(true) : auth && void signOut(auth)
-            }
-            aria-label="Открыть админ-панель"
-            title="Админ-панель"
-            className={`relative ml-auto inline-flex h-11 shrink-0 items-center justify-center gap-2 rounded-lg border px-3 transition hover:border-[#ea6a00]/30 hover:bg-orange-50 hover:text-[#ea6a00] lg:ml-0 lg:justify-self-end ${
-              isAdmin
-                ? "w-11 border-[#ea6a00]/30 bg-orange-50 text-[#ea6a00]"
-                : "border-slate-200 bg-white text-slate-500"
-            }`}
-          >
-            {isAdmin ? <ShieldCheck size={19} /> : <LogOut size={18} />}
-            {!isAdmin ? <span className="hidden text-sm font-semibold sm:inline">Выйти</span> : null}
+          <div className="ml-auto flex min-w-0 items-center gap-1 lg:ml-0 lg:justify-self-end">
             {isAdmin ? (
-              <span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-emerald-500" />
-            ) : null}
-          </button>
+              <button type="button" onClick={() => setIsAdminOpen(true)} title="Управление PSN HUB"
+                aria-label={`Открыть управление PSN HUB: ${user.email ?? "администратор"}`}
+                className="inline-flex h-11 min-w-0 items-center gap-2 rounded-lg border border-slate-200 px-3 text-[#ea6a00] hover:bg-orange-50">
+                <Crown size={19} className="shrink-0" />
+                <span className="max-w-[10rem] truncate text-sm font-semibold">{user.email?.split("@")[0] ?? "Администратор"}</span>
+              </button>
+            ) : (
+              <Link href="/cabinet" title="Личный кабинет" aria-label={`Открыть кабинет: ${accessUser?.login || user.email || "пользователь"}`}
+                className="inline-flex h-11 min-w-0 items-center gap-2 rounded-lg border border-slate-200 px-3 text-[#ea6a00] hover:bg-orange-50">
+                <UserRound size={19} className="shrink-0" />
+                <span className="max-w-[10rem] truncate text-sm font-semibold">{accessUser?.login || user.email || "Пользователь"}</span>
+              </Link>
+            )}
+            <button type="button" onClick={() => auth && void signOut(auth)} title="Выйти" aria-label="Выйти из аккаунта"
+              className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-[#ea6a00]">
+              <LogOut size={19} />
+            </button>
+          </div>
         </header>
 
         {activeTab !== "calendar" ? (
@@ -895,11 +958,33 @@ export default function Home() {
             }}
             onReset={() => {
               setFilters(emptyFilters);
+              setVideoFormatFilter("Все видео");
+              setVideoSort("newest");
               setPage(1);
             }}
           />
 
           <section className="space-y-5">
+            {activeTab === "webinars" ? (
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div role="group" aria-label="Формат видео" className="flex max-w-full gap-1 overflow-x-auto rounded-lg bg-white p-1 ring-1 ring-slate-200">
+                  {["Все видео", ...videoFormats].map((format) => (
+                    <button key={format} type="button" aria-pressed={videoFormatFilter === format}
+                      onClick={() => { setVideoFormatFilter(format); setPage(1); }}
+                      className={`shrink-0 rounded-md px-3 py-2 text-sm font-medium ${videoFormatFilter === format ? "bg-[#ea6a00] text-white" : "text-slate-600 hover:bg-orange-50"}`}>
+                      {format === "Вебинар" ? "Вебинары" : format === "Видеоурок" ? "Видеоуроки" : format === "Практический разбор" ? "Практические разборы" : format === "Инструкция" ? "Инструкции" : format}
+                    </button>
+                  ))}
+                </div>
+                <select aria-label="Сортировка видео" value={videoSort} onChange={(event) => { setVideoSort(event.target.value); setPage(1); }}
+                  className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700">
+                  <option value="newest">Сначала новые</option>
+                  <option value="oldest">Сначала старые</option>
+                  <option value="views">По просмотрам</option>
+                  <option value="duration">По длительности</option>
+                </select>
+              </div>
+            ) : null}
             <div className="flex items-center justify-between">
               <p className="text-sm font-medium text-slate-500">
                 Найдено: {visibleItemsCount}
@@ -974,6 +1059,7 @@ export default function Home() {
         onClose={() => setIsAdminOpen(false)}
         topicOptions={topicOptions}
         formatOptions={knowledgeFormatOptions}
+        videoCategories={videoCategories}
         materials={materials}
         tracks={tracks}
       />

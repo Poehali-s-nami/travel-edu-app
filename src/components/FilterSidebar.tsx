@@ -1,7 +1,7 @@
 "use client";
 
 import { SlidersHorizontal, X } from "lucide-react";
-import { getDurationBucket, getSpeakerCompanyLabel } from "@/lib/materials";
+import { categoryKey, getDurationBucket, getSpeakerCompanyLabel } from "@/lib/materials";
 import type { ContentTab, FilterState, Material } from "@/types/material";
 
 type FilterSidebarProps = {
@@ -27,7 +27,7 @@ export function filterMaterials(
   return materials.filter((material) => {
     const matchesTopics =
       filters.topics.length === 0 ||
-      filters.topics.every((topic) => material.category.includes(topic));
+      filters.topics.some((topic) => material.category.some((name) => categoryKey(name) === categoryKey(topic)));
 
     const speakerLabel = getSpeakerCompanyLabel(material);
     const matchesSpeakers =
@@ -100,7 +100,7 @@ export function FilterSidebar({
         />
         {activeTab === "webinars" ? (
           <FilterGroup
-            title="Спикер / Компания"
+            title="Автор / Организатор"
             values={options.speakers}
             selectedValues={filters.speakers}
             onToggle={(value) => toggleFilter("speakers", value)}

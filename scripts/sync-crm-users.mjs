@@ -313,6 +313,7 @@ function extractUserRecord(record, rowNumber) {
     getValue(record, ["display name", "name", "фио"]) ||
     [firstName, lastName].filter(Boolean).join(" ");
   const login = rawLogin || displayName;
+  const office = getValue(record, ["название офиса", "офис", "office"]);
   const email = getValue(record, ["email", "e-mail", "почта"]);
   const phone = getValue(record, ["phone", "телефон"]);
   const blocked = getValue(record, ["blocked", "заблокирован"]);
@@ -326,6 +327,7 @@ function extractUserRecord(record, rowNumber) {
     crmId,
     login,
     displayName,
+    office,
     email,
     phone,
     active,
@@ -338,9 +340,7 @@ if (dryRun) {
     extractUserRecord(record, headerRowIndex + index + 2)
   );
   const blockedUsers = users.filter((user) => user.isBlocked);
-  const validUsers = users.filter(
-    (user) => user.crmId && user.login && !user.isBlocked
-  );
+  const validUsers = users.filter((user) => user.crmId && user.login);
   const skippedUsers = users.filter((user) => !user.crmId || !user.login);
   const duplicateIds = new Set();
   const duplicateLogins = new Set();
@@ -363,7 +363,7 @@ if (dryRun) {
   console.log(`Строк с ID и логином: ${validUsers.length}`);
   console.log(`Уникальных пользователей к импорту: ${seenIds.size}`);
   console.log(`Пропущено без ID или логина/ФИО: ${skippedUsers.length}`);
-  console.log(`Пропущено заблокированных: ${blockedUsers.length}`);
+  console.log(`Будут архивированы как заблокированные: ${blockedUsers.length}`);
   console.log(`Активных: ${validUsers.filter((user) => user.active).length}`);
   console.log(`Архивных по статусу: ${validUsers.filter((user) => !user.active).length}`);
   console.log(`Повторных строк по ID: ${validUsers.length - seenIds.size}`);
@@ -432,18 +432,12 @@ async function syncAuthUser(crmId, userPayload) {
 }
 
 for (const [index, record] of records.entries()) {
-  const { rowNumber, crmId, login, displayName, email, phone, active, isBlocked } =
+  const { rowNumber, crmId, login, displayName, office, email, phone, active, isBlocked } =
     extractUserRecord(record, headerRowIndex + index + 2);
 
   if (!crmId || crmId.length > 128 || !login) {
     skipped += 1;
     console.warn(`Строка ${rowNumber} пропущена: проверьте ID и логин/ФИО.`);
-    continue;
-  }
-
-  if (isBlocked) {
-    skipped += 1;
-    console.warn(`Строка ${rowNumber} пропущена: пользователь заблокирован.`);
     continue;
   }
 
@@ -461,11 +455,27 @@ for (const [index, record] of records.entries()) {
   }
 
   const authEmail = loginToEmail(login);
+  const userRef = db.collection("accessUsers").doc(crmId);
+  const existingAccessSnapshot = await userRef.get();
+  const existingAccess = existingAccessSnapshot.exists
+    ? existingAccessSnapshot.data()
+    : null;
+
+  if (isBlocked && !existingAccessSnapshot.exists) {
+    importedIds.add(crmId);
+    importedLogins.add(normalizedLogin);
+    skipped += 1;
+    console.warn(`Строка ${rowNumber} пропущена: новый пользователь заблокирован в CRM.`);
+    continue;
+  }
+
+  const needsPasswordMigration =
+    active && Number(existingAccess?.passwordPolicyVersion ?? 0) < 1;
   const userPayload = {
     email: authEmail,
-    password: weeklyAccessCode,
     displayName: displayName || login,
-    disabled: !active
+    disabled: !active,
+    ...(needsPasswordMigration ? { password: weeklyAccessCode } : {})
   };
 
   let isNewUser = false;
@@ -489,21 +499,28 @@ for (const [index, record] of records.entries()) {
 
   importedIds.add(crmId);
   importedLogins.add(normalizedLogin);
-  const userRef = db.collection("accessUsers").doc(userRefId);
+  const resolvedUserRef = db.collection("accessUsers").doc(userRefId);
   batch.set(
-    userRef,
+    resolvedUserRef,
     {
       crmId,
       login,
       normalizedLogin,
       displayName: displayName || login,
+      office,
       email,
       phone,
       active,
       archived: !active,
       manual: false,
       source: "crm",
-      passwordResetRequested: false,
+      passwordResetRequested: needsPasswordMigration
+        ? true
+        : existingAccess?.passwordResetRequested === true,
+      passwordPolicyVersion: Math.max(
+        Number(existingAccess?.passwordPolicyVersion ?? 0),
+        needsPasswordMigration ? 1 : 0
+      ),
       updatedAt: FieldValue.serverTimestamp(),
       ...(isNewUser
         ? { role: "user", createdAt: FieldValue.serverTimestamp() }
@@ -525,6 +542,7 @@ if (archiveMissing) {
 
   for (const userDoc of snapshot.docs) {
     const userData = userDoc.data();
+    if (userData.source === "manual" || userData.manual === true) continue;
     const importedCrmId = String(userData.crmId ?? userDoc.id);
     if (importedIds.has(importedCrmId)) continue;
     archiveBatch.update(userDoc.ref, {

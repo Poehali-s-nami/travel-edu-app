@@ -18,6 +18,7 @@ service cloud.firestore {
           && exists(/databases/$(database)/documents/accessUsers/$(request.auth.uid))
           && get(/databases/$(database)/documents/accessUsers/$(request.auth.uid)).data.active == true
           && get(/databases/$(database)/documents/accessUsers/$(request.auth.uid)).data.archived != true
+          && get(/databases/$(database)/documents/accessUsers/$(request.auth.uid)).data.get('passwordResetRequested', false) != true
         );
     }
 
@@ -31,6 +32,11 @@ service cloud.firestore {
           request.resource.data.diff(resource.data).affectedKeys().hasOnly(['views'])
           && request.resource.data.views == resource.data.get('views', 0) + 1
         );
+    }
+
+    match /videoCategories/{categoryId} {
+      allow read: if isActiveUser();
+      allow write: if isAdmin();
     }
 
     match /tracks/{trackId} {
@@ -93,6 +99,11 @@ service cloud.firestore {
         && request.resource.data.userAgent is string
         && request.resource.data.createdAt == request.time;
       allow update, delete: if false;
+    }
+
+    match /adminImpersonations/{eventId} {
+      allow read: if isAdmin();
+      allow write: if false;
     }
 
     match /importHistory/{eventId} {

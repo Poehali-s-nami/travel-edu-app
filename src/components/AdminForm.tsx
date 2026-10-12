@@ -5,6 +5,7 @@ import type { ReactNode } from "react";
 import {
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
+  signInWithCustomToken,
   signInWithRedirect,
   signOut,
   updateProfile,
@@ -54,7 +55,7 @@ import {
   googleProvider
 } from "@/lib/firebase";
 import { loginToFirebaseEmail, normalizeLogin } from "@/lib/access";
-import { formatDate, uniqueSorted } from "@/lib/materials";
+import { categoryKey, formatDate, normalizeCategory, uniqueSorted, videoFormat, videoFormats } from "@/lib/materials";
 import { TrackInfoEditor } from "@/components/TrackInfoEditor";
 import { TrackPreview } from "@/components/TrackPreview";
 import { TrackMaterialPicker } from "@/components/TrackMaterialPicker";
@@ -70,6 +71,7 @@ import type {
 import type { AccessUser } from "@/types/access-user";
 
 const CRM_IMPORT_BATCH_SIZE = 12;
+const PERSONAL_PASSWORD_PATTERN = /^(?=.*\p{L})(?=.*\d).{6,}$/u;
 
 type AdminFormProps = {
   user: User | null;
@@ -77,6 +79,7 @@ type AdminFormProps = {
   onClose: () => void;
   topicOptions: Record<ContentTab, string[]>;
   formatOptions: string[];
+  videoCategories: string[];
   materials: Material[];
   tracks: LearningTrack[];
 };
@@ -89,6 +92,7 @@ type ParsedImportUser = {
   crmId: string;
   login: string;
   displayName: string;
+  office: string;
   email: string;
   phone: string;
   active: boolean;
@@ -99,7 +103,6 @@ type ImportPreview = {
   fileName: string;
   totalRows: number;
   validUsers: ParsedImportUser[];
-  hasStableIds: boolean;
   skippedMissing: number;
   skippedBlocked: number;
   duplicateIds: number;
@@ -154,6 +157,7 @@ const initialManualUserForm = {
   crmId: "",
   login: "",
   displayName: "",
+  office: "",
   email: "",
   phone: "",
   accessCode: ""
@@ -251,15 +255,14 @@ function buildImportPreview(fileName: string, rows: unknown[][]): ImportPreview 
       crmId,
       login,
       displayName: displayName || login,
+      office: getImportValue(record, ["название офиса", "офис", "office"]),
       email,
       phone: getImportValue(record, ["phone", "телефон"]),
       active: !isBlocked,
       isBlocked
     };
   });
-  const validSourceUsers = users.filter(
-    (importUser) => importUser.login && !importUser.isBlocked
-  );
+  const validSourceUsers = users.filter((importUser) => importUser.login);
   const seenIds = new Set<string>();
   const seenLogins = new Set<string>();
   const validUsers: ParsedImportUser[] = [];
@@ -291,7 +294,6 @@ function buildImportPreview(fileName: string, rows: unknown[][]): ImportPreview 
     fileName,
     totalRows: users.length,
     validUsers,
-    hasStableIds: validUsers.every((importUser) => Boolean(importUser.crmId.trim())),
     skippedMissing: users.filter((importUser) => !importUser.login)
       .length,
     skippedBlocked: users.filter((importUser) => importUser.isBlocked).length,
@@ -310,6 +312,7 @@ function AdminWorkspace({
   onClose,
   topicOptions,
   formatOptions,
+  videoCategories,
   materials,
   tracks
 }: AdminFormProps) {
@@ -358,6 +361,7 @@ function AdminWorkspace({
                 login: data.login ?? "",
                 normalizedLogin: data.normalizedLogin ?? "",
                 displayName: data.displayName ?? data.login ?? "Пользователь",
+                office: data.office ?? "",
                 email: data.email ?? "",
                 phone: data.phone ?? "",
                 role: data.role ?? "user",
@@ -366,6 +370,8 @@ function AdminWorkspace({
                 manual: data.manual === true,
                 source: data.source ?? "crm",
                 passwordResetRequested: data.passwordResetRequested === true,
+                passwordPolicyVersion: Number(data.passwordPolicyVersion ?? 0),
+                passwordChangedAt: toDate(data.passwordChangedAt),
                 createdAt: toDate(data.createdAt) ?? new Date(),
                 updatedAt: toDate(data.updatedAt),
                 lastLoginAt: toDate(data.lastLoginAt)
@@ -421,15 +427,31 @@ function AdminWorkspace({
     );
   }, [isAdmin, isOpen]);
 
-  const allTopicOptions = useMemo(
-    () =>
-      uniqueSorted([
-        ...topicOptions.webinars,
-        ...topicOptions.knowledge,
-        ...materials.flatMap((material) => material.tags ?? [])
-      ]),
-    [materials, topicOptions]
-  );
+  const allTopicOptions = useMemo(() => {
+    const options = new Map<string, string>();
+    for (const value of [...videoCategories, ...materials.flatMap((material) => material.category), ...topicOptions.knowledge]) {
+      const name = normalizeCategory(value);
+      if (name && !options.has(categoryKey(name))) options.set(categoryKey(name), name);
+    }
+    return uniqueSorted([...options.values()]);
+  }, [materials, topicOptions, videoCategories]);
+
+  async function addVideoCategory(input: string): Promise<string | null> {
+    const name = normalizeCategory(input);
+    if (!name || !db || !isAdmin) return null;
+    const existing = allTopicOptions.find((item) => categoryKey(item) === categoryKey(name));
+    if (existing) return existing;
+    try {
+      const categoryRef = doc(db, "videoCategories", encodeURIComponent(categoryKey(name)));
+      const categoryDoc = await getDoc(categoryRef);
+      if (categoryDoc.exists()) return String(categoryDoc.data().name ?? name);
+      await setDoc(categoryRef, { name });
+      return name;
+    } catch {
+      setMessage("Не удалось добавить категорию. Проверьте права Firestore.");
+      return null;
+    }
+  }
 
   const formatDatalist = useMemo(
     () =>
@@ -534,13 +556,13 @@ function AdminWorkspace({
         title: materialForm.title.trim(),
         hiddenFromLibrary: materialForm.hiddenFromLibrary,
         description: materialForm.description.trim(),
-        type: materialForm.type,
+        type: tab === "webinars" ? "video" : materialForm.type,
         url: materialForm.url.trim(),
         testUrl: materialForm.testUrl.trim(),
         coverUrl: materialForm.coverUrl.trim(),
-        category: splitList(materialForm.category),
+        category: splitCategories(materialForm.category, allTopicOptions),
         tags: splitList(materialForm.tags),
-        format: tab === "webinars" ? "Вебинар" : materialForm.format.trim(),
+        format: materialForm.format.trim(),
         author: {
           name: tab === "webinars" ? materialForm.speakerName.trim() : "",
           company: tab === "webinars" ? materialForm.speakerCompany.trim() : ""
@@ -614,7 +636,11 @@ function AdminWorkspace({
       const materialSnapshot = await getDoc(materialRef);
 
       if (materialSnapshot.exists()) {
-        await updateDoc(materialRef, payload);
+        const { author, ...fields } = payload;
+        await updateDoc(materialRef, {
+          ...fields,
+          ...(author ? { "author.name": author.name, "author.company": author.company ?? "" } : {})
+        });
       } else {
         const source = materials.find((material) => material.id === id);
 
@@ -739,8 +765,10 @@ function AdminWorkspace({
     const displayName = manualUserForm.displayName.trim() || login;
     const accessCode = manualUserForm.accessCode.trim();
 
-    if (!crmId || !login || accessCode.length < 6) {
-      setMessage("Заполните CRM ID, логин/ФИО и актуальный код доступа.");
+    if (!crmId || !login || !PERSONAL_PASSWORD_PATTERN.test(accessCode)) {
+      setMessage(
+        "Заполните CRM ID, логин/ФИО и первоначальный пароль: минимум 6 символов, буква и цифра."
+      );
       return;
     }
 
@@ -767,6 +795,7 @@ function AdminWorkspace({
           login,
           normalizedLogin: normalizeLogin(login),
           displayName,
+          office: manualUserForm.office.trim(),
           email: manualUserForm.email.trim(),
           phone: manualUserForm.phone.trim(),
           role: "user",
@@ -774,7 +803,8 @@ function AdminWorkspace({
           archived: false,
           manual: true,
           source: "manual",
-          passwordResetRequested: false,
+          passwordResetRequested: true,
+          passwordPolicyVersion: 1,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp()
         },
@@ -783,7 +813,7 @@ function AdminWorkspace({
 
       setManualUserForm(initialManualUserForm);
       setMessage(
-        "Пользователь добавлен вручную. При следующем импорте CRM запись обновится по этому же CRM ID и логину."
+        "Пользователь добавлен. При первом входе он обязательно создаст личный пароль; следующие импорты его не изменят."
       );
 
     } catch (error) {
@@ -819,7 +849,9 @@ function AdminWorkspace({
         raw: false
       });
 
-      setImportPreview(buildImportPreview(file.name, rows));
+      const preview = buildImportPreview(file.name, rows);
+      setImportPreview(preview);
+      setImportArchiveMissing(true);
     } catch (error) {
       console.error("Failed to parse CRM import file:", error);
       setMessage("Не удалось прочитать Excel-файл. Проверьте, что это .xlsx выгрузка CRM.");
@@ -839,16 +871,9 @@ function AdminWorkspace({
       return;
     }
 
-    if (importArchiveMissing && !importPreview.hasStableIds) {
-      setMessage(
-        "В этом файле нет отдельного CRM ID. Архивация отсутствующих отключена, чтобы не потерять доступ и прогресс действующих пользователей."
-      );
-      return;
-    }
-
     if (
       !window.confirm(
-        `Подтвердите импорт ${importPreview.validUsers.length} пользователей. Для них будет установлен указанный пароль. Уже пройденный прогресс сохранится у пользователей, найденных по CRM ID, логину или e-mail.`
+        `Подтвердите обработку ${importPreview.validUsers.length} записей. Первоначальный пароль будет установлен только новым пользователям и старым аккаунтам, которые еще не перешли на личный пароль. Личные пароли и прогресс остальных пользователей сохранятся.`
       )
     ) {
       return;
@@ -885,7 +910,6 @@ function AdminWorkspace({
         updated: 0,
         skipped:
           importPreview.skippedMissing +
-          importPreview.skippedBlocked +
           importPreview.duplicateIds +
           importPreview.duplicateLogins,
         imported: 0
@@ -908,6 +932,22 @@ function AdminWorkspace({
                 ? importPreview.validUsers
                     .map((importUser) => importUser.crmId)
                     .filter(Boolean)
+                : undefined,
+            allUserKeys:
+              importArchiveMissing && batchIndex === batches.length - 1
+                ? Array.from(
+                    new Set(
+                      importPreview.validUsers.flatMap((importUser) => [
+                        importUser.crmId.trim()
+                          ? `crm:${importUser.crmId.trim()}`
+                          : "",
+                        `login:${normalizeLogin(importUser.login)}`,
+                        importUser.email.trim()
+                          ? `email:${importUser.email.trim().toLowerCase()}`
+                          : ""
+                      ]).filter(Boolean)
+                    )
+                  )
                 : undefined,
             users: batch
           })
@@ -989,9 +1029,6 @@ function AdminWorkspace({
       <div className="flex h-full flex-col">
         <header className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
           <div>
-            <p className="text-xs font-semibold uppercase tracking-wide text-[#ea6a00]">
-              Админ-панель
-            </p>
             <h2 className="text-xl font-semibold text-slate-950">
               Управление PSN HUB
             </h2>
@@ -1001,10 +1038,11 @@ function AdminWorkspace({
               <button
                 type="button"
                 onClick={() => navigate(() => void handleLogout())}
-                className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 hover:bg-slate-50"
+                aria-label="Выйти из аккаунта"
+                title="Выйти"
+                className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50"
               >
-                <LogOut size={16} />
-                Выйти
+                <LogOut size={18} />
               </button>
             ) : null}
             <button
@@ -1079,7 +1117,7 @@ function AdminWorkspace({
                     />
                     <AddChoice
                       icon={<GraduationCap size={28} />}
-                      title="Добавить вебинар"
+                      title="Добавить видеоматериал"
                       description="Видео, спикер, темы и описание."
                       onClick={() => chooseAddMode("webinar")}
                     />
@@ -1108,6 +1146,7 @@ function AdminWorkspace({
                     mode={addMode}
                     form={materialForm}
                     allTopicOptions={allTopicOptions}
+                    onAddCategory={addVideoCategory}
                     formatDatalist={formatDatalist}
                     isSubmitting={isSubmitting}
                     onBack={() => navigate(() => setAddMode("menu"))}
@@ -1122,6 +1161,8 @@ function AdminWorkspace({
                   selectedId={selectedEntityId}
                   materials={materials}
                   tracks={tracks}
+                  allTopicOptions={allTopicOptions}
+                  onAddCategory={addVideoCategory}
                   onModeChange={(mode) => navigate(() => {
                     setArchiveMode(mode);
                     setSelectedEntityId(null);
@@ -1259,6 +1300,7 @@ function MaterialCreateForm({
   mode,
   form,
   allTopicOptions,
+  onAddCategory,
   formatDatalist,
   isSubmitting,
   onBack,
@@ -1268,6 +1310,7 @@ function MaterialCreateForm({
   mode: Exclude<AddMode, "menu" | "track">;
   form: typeof initialMaterialForm;
   allTopicOptions: string[];
+  onAddCategory: (name: string) => Promise<string | null>;
   formatDatalist: string[];
   isSubmitting: boolean;
   onBack: () => void;
@@ -1290,20 +1333,26 @@ function MaterialCreateForm({
       className="rounded-xl bg-white p-5 shadow-sm ring-1 ring-slate-200"
     >
       <FormHeader
-        title={isWebinar ? "Добавить вебинар" : "Пополнить базу знаний"}
+        title={isWebinar ? "Добавить видеоматериал" : "Пополнить базу знаний"}
         onBack={onBack}
       />
       <div className="mt-5 grid gap-4 md:grid-cols-2">
-        <label className="flex items-center gap-2 text-sm text-slate-700 md:col-span-2">
-          <input type="checkbox" checked={form.hiddenFromLibrary} onChange={(event) => onFormChange({ ...form, hiddenFromLibrary: event.target.checked })} />
-          Скрывать из библиотеки
-        </label>
+        {isWebinar ? <h3 className="text-sm font-semibold text-slate-900 md:col-span-2">Основное</h3> : null}
         <TextField
           label="Название"
           value={form.title}
           onChange={(value) => onFormChange({ ...form, title: value })}
           required
         />
+        {isWebinar ? (
+          <label className="text-sm font-medium text-slate-700">Формат
+            <select required value={form.format} onChange={(event) => onFormChange({ ...form, format: event.target.value })}
+              className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2.5 text-slate-900">
+              {videoFormats.map((format) => <option key={format} value={format}>{format}</option>)}
+            </select>
+          </label>
+        ) : <TextField label="Формат базы знаний" value={form.format} list="knowledge-formats"
+          placeholder="PDF, Документ, Таблица..." onChange={(value) => onFormChange({ ...form, format: value })} required />}
         <TextField
           label={isWebinar ? "Ссылка на видео" : "Ссылка на файл"}
           value={form.url}
@@ -1311,13 +1360,13 @@ function MaterialCreateForm({
           onChange={(value) => onFormChange({ ...form, url: value })}
           required
         />
-        <TextField
-          label="Ссылка на тестирование"
-          value={form.testUrl}
-          placeholder="https://testograf-app.pages.dev/#t=..."
-          onChange={(value) => onFormChange({ ...form, testUrl: value })}
-        />
-        <label className="text-sm font-medium text-slate-700">
+        <label className="text-sm font-medium text-slate-700 md:col-span-2">
+          Описание
+          <textarea value={form.description} onChange={(event) => onFormChange({ ...form, description: event.target.value })}
+            required rows={4}
+            className="mt-2 w-full resize-none rounded-lg border border-slate-200 px-3 py-2.5 text-slate-900 outline-none transition focus:border-[#ea6a00] focus:ring-2 focus:ring-orange-100" />
+        </label>
+        {!isWebinar ? <label className="text-sm font-medium text-slate-700">
           Тип материала
           <select
             value={form.type}
@@ -1329,29 +1378,22 @@ function MaterialCreateForm({
             <option value="video">Видео</option>
             <option value="file">Файл</option>
           </select>
-        </label>
-        <TextField
-          label={isWebinar ? "Формат" : "Формат базы знаний"}
-          value={form.format}
-          list={isWebinar ? undefined : "knowledge-formats"}
-          placeholder="PDF, Документ, Таблица..."
-          onChange={(value) => onFormChange({ ...form, format: value })}
-          required
-          disabled={isWebinar}
-        />
+        </label> : null}
+        {isWebinar ? <h3 className="text-sm font-semibold text-slate-900 md:col-span-2">Классификация</h3> : null}
         <datalist id="knowledge-formats">
           {formatDatalist.map((format) => (
             <option key={format} value={format} />
           ))}
         </datalist>
-        <TextField
+        {isWebinar ? <CategoryPicker value={form.category} options={allTopicOptions}
+          onChange={(category) => onFormChange({ ...form, category })} onAdd={onAddCategory} /> : <TextField
           label="Темы / категории"
           value={form.category}
           placeholder="Маркетинг, Продажи"
           list="admin-all-topics"
           onChange={(value) => onFormChange({ ...form, category: value })}
           required
-        />
+        />}
         <datalist id="admin-all-topics">
           {allTopicOptions.map((topic) => (
             <option key={topic} value={topic} />
@@ -1364,6 +1406,7 @@ function MaterialCreateForm({
           list="admin-all-tags"
           onChange={(value) => onFormChange({ ...form, tags: value })}
         />
+        {isWebinar ? <h3 className="text-sm font-semibold text-slate-900 md:col-span-2">Дополнительное</h3> : null}
         <TextField
           label="Длительность, минут"
           type="number"
@@ -1371,22 +1414,28 @@ function MaterialCreateForm({
           onChange={(value) => onFormChange({ ...form, duration: Number(value) })}
           required
         />
+        <TextField
+          label="Ссылка на тестирование"
+          value={form.testUrl}
+          placeholder="https://testograf-app.pages.dev/#t=..."
+          onChange={(value) => onFormChange({ ...form, testUrl: value })}
+        />
         {isWebinar ? (
           <>
             <TextField
-              label="Спикер"
+              label="Автор / Спикер"
               value={form.speakerName}
               onChange={(value) => onFormChange({ ...form, speakerName: value })}
             />
             <TextField
-              label="Компания"
+              label="Компания / Организатор"
               value={form.speakerCompany}
               onChange={(value) =>
                 onFormChange({ ...form, speakerCompany: value })
               }
             />
             <label className="text-sm font-medium text-slate-700">
-              Trending Stamp
+              Метка на обложке
               <select
                 value={form.trendingStamp}
                 onChange={(event) =>
@@ -1413,17 +1462,10 @@ function MaterialCreateForm({
           placeholder="https://..."
           onChange={(value) => onFormChange({ ...form, coverUrl: value })}
         />
-        <label className="text-sm font-medium text-slate-700 md:col-span-2">
-          Описание
-          <textarea
-            value={form.description}
-            onChange={(event) =>
-              onFormChange({ ...form, description: event.target.value })
-            }
-            required
-            rows={4}
-            className="mt-2 w-full resize-none rounded-lg border border-slate-200 px-3 py-2.5 text-slate-900 outline-none transition focus:border-[#ea6a00] focus:ring-2 focus:ring-orange-100"
-          />
+        {isWebinar ? <h3 className="text-sm font-semibold text-slate-900 md:col-span-2">Публикация</h3> : null}
+        <label className="flex items-center gap-2 text-sm text-slate-700 md:col-span-2">
+          <input type="checkbox" checked={form.hiddenFromLibrary} onChange={(event) => onFormChange({ ...form, hiddenFromLibrary: event.target.checked })} />
+          {isWebinar ? "Скрывать из Видеотеки" : "Скрывать из библиотеки"}
         </label>
       </div>
       <SubmitButton isSubmitting={isSubmitting} label="Добавить материал" />
@@ -1567,6 +1609,11 @@ function ManualUserCreateForm({
           onChange={(value) => onFormChange({ ...form, displayName: value })}
         />
         <TextField
+          label="Название офиса"
+          value={form.office}
+          onChange={(value) => onFormChange({ ...form, office: value })}
+        />
+        <TextField
           label="Почта"
           type="email"
           value={form.email}
@@ -1578,10 +1625,10 @@ function ManualUserCreateForm({
           onChange={(value) => onFormChange({ ...form, phone: value })}
         />
         <TextField
-          label="Актуальный код доступа"
+          label="Первоначальный пароль"
           type="password"
           value={form.accessCode}
-          placeholder="Текущий недельный код"
+          placeholder="Пользователь сменит его при первом входе"
           onChange={(value) => onFormChange({ ...form, accessCode: value })}
           required
         />
@@ -1644,8 +1691,9 @@ function CrmImportPanel({
             </h3>
           </div>
           <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-500">
-            Загрузите Excel-выгрузку. Система обновит существующих пользователей,
-            создаст новых, применит актуальный код доступа и пропустит заблокированных.
+            Загрузите полную Excel-выгрузку. Система обновит сотрудников, создаст
+            новых и архивирует заблокированных. Личные пароли и прогресс действующих
+            пользователей сохранятся.
           </p>
         </div>
 
@@ -1686,9 +1734,9 @@ function CrmImportPanel({
             </p>
             <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
               <ImportStat label="Всего строк" value={preview.totalRows} />
-              <ImportStat label="К импорту" value={preview.validUsers.length} />
+              <ImportStat label="К обработке" value={preview.validUsers.length} />
               <ImportStat label="Без логина/e-mail" value={preview.skippedMissing} />
-              <ImportStat label="Заблокированы" value={preview.skippedBlocked} />
+              <ImportStat label="Будут архивированы" value={preview.skippedBlocked} />
               <ImportStat
                 label="Повторы"
                 value={preview.duplicateIds + preview.duplicateLogins}
@@ -1698,7 +1746,7 @@ function CrmImportPanel({
 
           <div className="grid gap-4 lg:grid-cols-[1fr_auto_auto] lg:items-end">
             <TextField
-              label="Пароль для импортируемых пользователей"
+              label="Первоначальный пароль для новых пользователей"
               type="password"
               value={accessCode}
               placeholder="Задайте пароль перед импортом"
@@ -1732,19 +1780,14 @@ function CrmImportPanel({
           <label className="flex items-start gap-3 rounded-lg border border-slate-200 p-3 text-sm text-slate-600">
             <input
               type="checkbox"
-              checked={archiveMissing && preview.hasStableIds}
-              disabled={!preview.hasStableIds}
+              checked={archiveMissing}
               onChange={(event) => onArchiveMissingChange(event.target.checked)}
               className="mt-1 h-4 w-4 rounded border-slate-300 text-[#ea6a00] focus:ring-[#ea6a00] disabled:cursor-not-allowed disabled:opacity-50"
             />
             <span>
-              Архивировать пользователей, которых нет в этой выгрузке. Включайте
-              только если файл точно полный, а не частичная выборка.
-              {!preview.hasStableIds ? (
-                <span className="mt-1 block text-[#b95200]">
-                  В текущем файле нет CRM ID, поэтому архивация отключена для защиты прогресса пользователей.
-                </span>
-              ) : null}
+              Архивировать пользователей, которых нет в этой выгрузке. Их прогресс
+              не удаляется. Оставляйте включенным только для полной CRM-выгрузки,
+              а не частичной выборки.
             </span>
           </label>
         </div>
@@ -1968,8 +2011,67 @@ function UserEditor({
   onUpdate: (id: string, payload: Partial<AccessUser>) => Promise<void>;
 }) {
   const [displayName, setDisplayName] = useState(accessUser.displayName);
+  const [office, setOffice] = useState(accessUser.office ?? "");
   const [email, setEmail] = useState(accessUser.email ?? "");
   const [phone, setPhone] = useState(accessUser.phone ?? "");
+  const [temporaryPassword, setTemporaryPassword] = useState("");
+  const [resetMessage, setResetMessage] = useState("");
+  const [resetting, setResetting] = useState(false);
+  const [impersonationMessage, setImpersonationMessage] = useState("");
+  const [impersonating, setImpersonating] = useState(false);
+  const passwordInputRef = useRef<HTMLInputElement>(null);
+
+  async function impersonate() {
+    if (!auth?.currentUser || !accessUser.active || accessUser.archived || accessUser.passwordResetRequested) return;
+    if (!window.confirm(`Войти под ${accessUser.displayName}? Все действия будут сохранены от имени сотрудника. Для возврата к админке потребуется войти снова.`)) return;
+    setImpersonating(true);
+    setImpersonationMessage("");
+    try {
+      const idToken = await auth.currentUser.getIdToken(true);
+      const response = await fetch("/api/admin/impersonate", {
+        method: "POST",
+        headers: { authorization: `Bearer ${idToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ uid: accessUser.id }),
+        cache: "no-store"
+      });
+      const result = (await response.json()) as { token?: string; message?: string };
+      if (!response.ok || !result.token) throw new Error(result.message ?? "Не удалось войти под сотрудником.");
+      await signInWithCustomToken(auth, result.token);
+      window.localStorage.removeItem("travel-edu-session-start");
+      window.location.assign("/");
+    } catch (error) {
+      setImpersonationMessage(error instanceof Error ? error.message : "Не удалось войти под сотрудником.");
+      setImpersonating(false);
+    }
+  }
+
+  async function resetPassword() {
+    if (!PERSONAL_PASSWORD_PATTERN.test(temporaryPassword)) {
+      setResetMessage("Введите минимум 6 символов, букву и цифру.");
+      return;
+    }
+    if (!window.confirm(`Сбросить пароль сотрудника ${accessUser.displayName}?`)) return;
+    setResetting(true);
+    setResetMessage("");
+    try {
+      const idToken = await auth?.currentUser?.getIdToken();
+      const response = await fetch("/api/admin/reset-user-password", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${idToken ?? ""}`,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({ uid: accessUser.id, password: temporaryPassword })
+      });
+      const result = (await response.json()) as { message?: string };
+      if (!response.ok) throw new Error(result.message ?? "Не удалось сбросить пароль.");
+      setResetMessage("Пароль сброшен. Передайте временный пароль сотруднику лично; при входе он создаст новый.");
+    } catch (error) {
+      setResetMessage(error instanceof Error ? error.message : "Не удалось сбросить пароль.");
+    } finally {
+      setResetting(false);
+    }
+  }
 
   return (
     <div className="space-y-5">
@@ -1996,10 +2098,23 @@ function UserEditor({
         <p className="mt-1 break-all font-mono text-xs text-slate-400">
           Firebase UID: {accessUser.id}
         </p>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <button type="button" onClick={() => void impersonate()}
+            disabled={impersonating || !accessUser.active || accessUser.archived || accessUser.passwordResetRequested}
+            className="inline-flex items-center gap-2 rounded-lg bg-[#ea6a00] px-3 py-2 text-sm font-semibold text-white hover:bg-[#cf5e00] disabled:cursor-not-allowed disabled:opacity-50">
+            <LogIn size={16} />{impersonating ? "Входим..." : "Войти под пользователем"}
+          </button>
+          <button type="button" onClick={() => passwordInputRef.current?.focus()}
+            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
+            <KeyRound size={16} />Сбросить пароль
+          </button>
+        </div>
+        {impersonationMessage ? <p role="alert" className="mt-2 text-sm text-red-700">{impersonationMessage}</p> : null}
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
         <TextField label="Имя" value={displayName} onChange={setDisplayName} />
+        <TextField label="Название офиса" value={office} onChange={setOffice} />
         <label className="text-sm font-medium text-slate-700">
           Роль
           <span className="mt-2 block rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 font-normal text-slate-600">
@@ -2016,12 +2131,39 @@ function UserEditor({
           <div>
             <p className="text-sm font-semibold text-slate-800">Пароль</p>
             <p className="mt-1 text-sm leading-6 text-slate-500">
-              Пользователь входит с общим недельным кодом. Код применяется ко
-              всем активным учетным записям во время защищенной синхронизации и
-              никогда не сохраняется в Firestore.
+              Пользователь входит с личным паролем. Первоначальный пароль
+              назначается при создании аккаунта и обязательно меняется самим
+              пользователем при первом входе.
             </p>
           </div>
         </div>
+      </div>
+
+      <div className="rounded-lg border border-slate-200 p-4">
+        <p className="text-sm font-semibold text-slate-800">Сбросить пароль сотрудника</p>
+        <p className="mt-1 text-sm text-slate-500">Назначьте временный пароль. При следующем входе сотрудник обязательно заменит его личным.</p>
+        <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+          <input
+            ref={passwordInputRef}
+            type="password"
+            value={temporaryPassword}
+            onChange={(event) => setTemporaryPassword(event.target.value)}
+            autoComplete="new-password"
+            placeholder="Временный пароль"
+            aria-label="Временный пароль сотрудника"
+            className="min-w-0 flex-1 rounded-lg border border-slate-200 px-3 py-2.5 text-sm outline-none focus:border-[#ea6a00]"
+          />
+          <button
+            type="button"
+            onClick={() => void resetPassword()}
+            disabled={resetting || !accessUser.active || accessUser.archived}
+            className="inline-flex items-center justify-center gap-2 rounded-lg border border-[#ea6a00] px-4 py-2.5 text-sm font-semibold text-[#c95b00] hover:bg-orange-50 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <KeyRound size={16} />
+            {resetting ? "Сбрасываем..." : "Сбросить пароль"}
+          </button>
+        </div>
+        {resetMessage ? <p role="status" className="mt-2 text-sm text-slate-600">{resetMessage}</p> : null}
       </div>
 
       <div className="flex flex-wrap gap-2 border-t border-slate-100 pt-5">
@@ -2030,6 +2172,7 @@ function UserEditor({
           onClick={() =>
             void onUpdate(accessUser.id, {
               displayName,
+              office,
               email,
               phone,
               role: "user"
@@ -2099,11 +2242,11 @@ function WeeklyCodeGenerator() {
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <h3 className="text-lg font-semibold text-slate-950">
-            Недельный код доступа
+            Генератор первоначального пароля
           </h3>
           <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-500">
-            Сгенерируйте код, примените его защищенной синхронизацией, затем
-            опубликуйте в новости CRM. Код показывается только в этом окне.
+            Сгенерируйте временный пароль для новых пользователей перед импортом.
+            После первого входа каждый сотрудник обязательно заменит его личным.
           </p>
         </div>
         <button
@@ -2141,6 +2284,8 @@ function ArchiveWorkspace({
   selectedId,
   materials,
   tracks,
+  allTopicOptions,
+  onAddCategory,
   onModeChange,
   onFilterChange,
   onSelect,
@@ -2153,6 +2298,8 @@ function ArchiveWorkspace({
   selectedId: string | null;
   materials: Material[];
   tracks: LearningTrack[];
+  allTopicOptions: string[];
+  onAddCategory: (name: string) => Promise<string | null>;
   onModeChange: (mode: ArchiveMode) => void;
   onFilterChange: (filter: ArchiveFilter) => void;
   onSelect: (id: string | null) => void;
@@ -2187,7 +2334,7 @@ function ArchiveWorkspace({
           <PillButton
             active={mode === "webinars"}
             icon={<GraduationCap size={16} />}
-            label="Архив библиотеки вебинаров"
+            label="Архив Видеотеки"
             onClick={() => onModeChange("webinars")}
           />
           <PillButton
@@ -2239,8 +2386,8 @@ function ArchiveWorkspace({
                 {item.title}
               </span>
               <span className="mt-1 block text-xs text-slate-400">
-                {formatDate(item.createdAt)} · {item.archived ? "архив" : "активно"}
-                {"hiddenFromLibrary" in item && item.hiddenFromLibrary ? " · скрыт из библиотеки" : ""}
+                {item.createdAt.getTime() > 0 ? formatDate(item.createdAt) : "Дата не указана"} · {item.archived ? "архив" : "активно"}
+                {"hiddenFromLibrary" in item && item.hiddenFromLibrary ? mode === "webinars" ? " · скрыт из Видеотеки" : " · скрыт из библиотеки" : ""}
               </span>
             </button>
           ))}
@@ -2251,6 +2398,8 @@ function ArchiveWorkspace({
           <MaterialEditor
             key={selectedMaterial.id}
             material={selectedMaterial}
+            allTopicOptions={allTopicOptions}
+            onAddCategory={onAddCategory}
             onUpdate={onUpdateMaterial}
             onDelete={(id) => onDelete("materials", id)}
           />
@@ -2274,10 +2423,14 @@ function ArchiveWorkspace({
 
 function MaterialEditor({
   material,
+  allTopicOptions,
+  onAddCategory,
   onUpdate,
   onDelete
 }: {
   material: Material;
+  allTopicOptions: string[];
+  onAddCategory: (name: string) => Promise<string | null>;
   onUpdate: (id: string, payload: Partial<Material>) => Promise<boolean>;
   onDelete: (id: string) => Promise<void>;
 }) {
@@ -2289,7 +2442,7 @@ function MaterialEditor({
   const [coverUrl, setCoverUrl] = useState(material.coverUrl ?? "");
   const [url, setUrl] = useState(material.url);
   const [testUrl, setTestUrl] = useState(material.testUrl ?? "");
-  const [format, setFormat] = useState(material.format);
+  const [format, setFormat] = useState(material.tab === "webinars" ? videoFormat(material.format) : material.format);
   const [speakerName, setSpeakerName] = useState(material.author.name);
   const [speakerCompany, setSpeakerCompany] = useState(
     material.author.company ?? ""
@@ -2299,12 +2452,12 @@ function MaterialEditor({
   );
   const navigate = useEditorNavigation();
   const payload = { hiddenFromLibrary, title, description, url, testUrl, coverUrl, format,
-    category: splitList(category), tags: splitList(tags),
-    author: { name: speakerName, company: speakerCompany }, trendingStamp: trendingStamp || null };
+    category: material.tab === "webinars" ? splitCategories(category, allTopicOptions) : splitList(category), tags: splitList(tags),
+    ...(material.tab === "webinars" ? { author: { name: speakerName, company: speakerCompany }, trendingStamp: trendingStamp || null } : {}) };
   const save = useEditorDraft(payload, () => onUpdate(material.id, payload), () => {
     setTitle(material.title); setDescription(material.description); setUrl(material.url);
     setHiddenFromLibrary(material.hiddenFromLibrary ?? false); setTestUrl(material.testUrl ?? "");
-    setCoverUrl(material.coverUrl ?? ""); setFormat(material.format);
+    setCoverUrl(material.coverUrl ?? ""); setFormat(material.tab === "webinars" ? videoFormat(material.format) : material.format);
     setCategory(material.category.join(", ")); setTags((material.tags ?? []).join(", "));
     setSpeakerName(material.author.name); setSpeakerCompany(material.author.company ?? "");
     setTrendingStamp(material.trendingStamp ?? "");
@@ -2315,11 +2468,19 @@ function MaterialEditor({
       <EditorTitle id={material.id} archived={Boolean(material.archived)} />
       <label className="flex items-center gap-2 text-sm text-slate-700">
         <input type="checkbox" checked={hiddenFromLibrary} onChange={(event) => setHiddenFromLibrary(event.target.checked)} />
-        Скрывать из библиотеки
+        {material.tab === "webinars" ? "Скрывать из Видеотеки" : "Скрывать из библиотеки"}
       </label>
       <div className="grid gap-4 md:grid-cols-2">
         <TextField label="Название" value={title} onChange={setTitle} />
-        <TextField label="Формат" value={format} onChange={setFormat} />
+        {material.tab === "webinars" ? (
+          <label className="text-sm font-medium text-slate-700">Формат
+            <select value={format || "Вебинар"} onChange={(event) => setFormat(event.target.value)}
+              className="mt-2 w-full rounded-lg border border-slate-200 px-3 py-2.5 text-slate-900">
+              {format && !videoFormats.includes(format as (typeof videoFormats)[number]) ? <option value={format}>{format} (старый формат)</option> : null}
+              {videoFormats.map((item) => <option key={item} value={item}>{item}</option>)}
+            </select>
+          </label>
+        ) : <TextField label="Формат" value={format} onChange={setFormat} />}
         <TextField label="URL" value={url} onChange={setUrl} />
         <TextField
           label="Ссылка на тестирование"
@@ -2327,22 +2488,23 @@ function MaterialEditor({
           onChange={setTestUrl}
         />
         <TextField label="Обложка" value={coverUrl} onChange={setCoverUrl} />
-        <TextField label="Темы" value={category} onChange={setCategory} />
+        {material.tab === "webinars" ? <CategoryPicker value={category} options={allTopicOptions}
+          onChange={setCategory} onAdd={onAddCategory} /> : <TextField label="Темы" value={category} onChange={setCategory} />}
         <TextField label="Теги" value={tags} onChange={setTags} />
         {material.tab === "webinars" ? (
           <>
             <TextField
-              label="Спикер"
+              label="Автор / Спикер"
               value={speakerName}
               onChange={setSpeakerName}
             />
             <TextField
-              label="Компания"
+              label="Компания / Организатор"
               value={speakerCompany}
               onChange={setSpeakerCompany}
             />
             <label className="text-sm font-medium text-slate-700">
-              Trending Stamp
+              Метка на обложке
               <select
                 value={trendingStamp}
                 onChange={(event) =>
@@ -2603,6 +2765,68 @@ function splitList(value: string) {
     .split(",")
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function splitCategories(value: string, options: string[]) {
+  const canonical = new Map(options.map((name) => [categoryKey(name), name]));
+  const selected = new Map<string, string>();
+  for (const item of splitList(value)) {
+    const name = normalizeCategory(item);
+    if (name) selected.set(categoryKey(name), canonical.get(categoryKey(name)) ?? name);
+  }
+  return [...selected.values()];
+}
+
+function CategoryPicker({ value, options, onChange, onAdd }: {
+  value: string;
+  options: string[];
+  onChange: (value: string) => void;
+  onAdd: (name: string) => Promise<string | null>;
+}) {
+  const [newName, setNewName] = useState("");
+  const [adding, setAdding] = useState(false);
+  const selected = splitCategories(value, options);
+
+  function toggle(name: string) {
+    const next = selected.some((item) => categoryKey(item) === categoryKey(name))
+      ? selected.filter((item) => categoryKey(item) !== categoryKey(name))
+      : [...selected, name];
+    onChange(next.join(", "));
+  }
+
+  async function add() {
+    if (!normalizeCategory(newName)) return;
+    setAdding(true);
+    try {
+      const name = await onAdd(newName);
+      if (name && !selected.some((item) => categoryKey(item) === categoryKey(name))) {
+        onChange([...selected, name].join(", "));
+      }
+      if (name) setNewName("");
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  return (
+    <fieldset className="min-w-0 rounded-lg border border-slate-200 p-3 md:col-span-2">
+      <legend className="px-1 text-sm font-medium text-slate-700">Тематики / категории</legend>
+      <div className="flex max-h-40 flex-wrap gap-2 overflow-y-auto">
+        {options.map((name) => (
+          <label key={categoryKey(name)} className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-slate-200 px-2 py-1 text-sm text-slate-700">
+            <input type="checkbox" checked={selected.some((item) => categoryKey(item) === categoryKey(name))}
+              onChange={() => toggle(name)} className="accent-[#ea6a00]" />{name}
+          </label>
+        ))}
+      </div>
+      <div className="mt-3 flex gap-2">
+        <input value={newName} onChange={(event) => setNewName(event.target.value)}
+          placeholder="Новая категория" maxLength={100} className="min-w-0 flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm" />
+        <button type="button" onClick={() => void add()} disabled={adding || !newName.trim()}
+          className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-[#b85300] disabled:opacity-50">Добавить</button>
+      </div>
+    </fieldset>
+  );
 }
 
 type TextFieldProps = {
