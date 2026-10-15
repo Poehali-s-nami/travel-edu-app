@@ -319,8 +319,6 @@ async function commitFirestoreWrites(
 function accessUserWrite(
   uid: string,
   user: ImportUser,
-  passwordResetRequested: boolean,
-  passwordPolicyVersion: number,
   isNewUser: boolean,
   trainingRoleManual: boolean,
   provisionedAuth: boolean
@@ -336,10 +334,12 @@ function accessUserWrite(
     phone: firestoreValue(user.phone ?? ""),
     active: firestoreValue(user.active),
     archived: firestoreValue(!user.active),
-    passwordResetRequested: firestoreValue(provisionedAuth ? true : passwordResetRequested),
-    passwordPolicyVersion: firestoreValue(provisionedAuth ? 0 : passwordPolicyVersion),
     updatedAt: { timestampValue: new Date().toISOString() }
   };
+  if (isNewUser || provisionedAuth) {
+    fields.passwordResetRequested = firestoreValue(provisionedAuth);
+    fields.passwordPolicyVersion = firestoreValue(0);
+  }
   if (user.officeIds) fields.officeIds = firestoreStringArray(user.officeIds);
   if (user.offices) fields.offices = firestoreStringArray(user.offices);
   if (user.officeLinks) fields.officeLinks = firestoreOfficeLinks(user.officeLinks);
@@ -385,6 +385,7 @@ type AccessUserRecord = {
   source: string;
   passwordResetRequested: boolean;
   passwordPolicyVersion: number;
+  passwordChangedAt: string;
   trainingRoleManual: boolean;
   claimState: string;
 };
@@ -400,10 +401,19 @@ type AccessUserDocument = {
     manual?: { booleanValue?: boolean };
     passwordResetRequested?: { booleanValue?: boolean };
     passwordPolicyVersion?: { integerValue?: string };
+    passwordChangedAt?: { timestampValue?: string };
     trainingRoleManual?: { booleanValue?: boolean };
     claimState?: { stringValue?: string };
   };
 };
+
+async function parseBatchGet(response: Response): Promise<Array<{ found?: AccessUserDocument }>> {
+  const body = (await response.text()).trim();
+  if (!body) return [];
+  if (body.startsWith("[")) return JSON.parse(body) as Array<{ found?: AccessUserDocument }>;
+  return body.split(/\r?\n/).filter(Boolean).map((line) =>
+    JSON.parse(line) as { found?: AccessUserDocument });
+}
 
 function accessUserRecord(document: AccessUserDocument): AccessUserRecord {
   const fallbackId = document.name.split("/").pop() ?? "";
@@ -418,9 +428,15 @@ function accessUserRecord(document: AccessUserDocument): AccessUserRecord {
       (document.fields?.manual?.booleanValue ? "manual" : "crm"),
     passwordResetRequested: document.fields?.passwordResetRequested?.booleanValue === true,
     passwordPolicyVersion: Number(document.fields?.passwordPolicyVersion?.integerValue ?? 0),
+    passwordChangedAt: document.fields?.passwordChangedAt?.timestampValue ?? "",
     trainingRoleManual: document.fields?.trainingRoleManual?.booleanValue === true,
     claimState: document.fields?.claimState?.stringValue ?? "claimed"
   };
+}
+
+function canRotateWeeklyPassword(user: AccessUserRecord) {
+  return user.source === "crm" && user.claimState === "claimed" &&
+    user.passwordResetRequested && user.passwordPolicyVersion === 0 && !user.passwordChangedAt;
 }
 
 async function listAccessUsers(token: string) {
@@ -489,17 +505,34 @@ async function listMatchingAccessUsers(token: string, users: ImportUser[]) {
       method: "POST",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
       body: JSON.stringify({
-        documents: crmIds.slice(index, index + 100).map((id) => `${base}/documents/accessUsers/${id}`)
+        documents: crmIds.slice(index, index + 100).map((id) =>
+          `projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents/accessUsers/${id}`)
       })
     });
     if (!response.ok) throw new Error(`Firestore ID lookup failed: ${await response.text()}`);
-    const rows = (await response.json()) as Array<{ found?: AccessUserDocument }>;
+    const rows = await parseBatchGet(response);
     for (const row of rows) {
       if (row.found) records.set(row.found.name, accessUserRecord(row.found));
     }
   }
 
   return [...records.values()];
+}
+
+async function readCurrentAccessUsers(token: string, uids: string[]) {
+  const base = `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)`;
+  const response = await fetch(`${base}/documents:batchGet`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ documents: uids.map((uid) =>
+      `projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents/accessUsers/${uid}`) })
+  });
+  if (!response.ok) throw new Error(`Password rotation profile check failed: ${await response.text()}`);
+  const rows = await parseBatchGet(response);
+  return new Map(rows.filter((row) => row.found).map((row) => {
+    const record = accessUserRecord(row.found!);
+    return [record.uid, record];
+  }));
 }
 
 async function resolveImportIdentity(
@@ -609,6 +642,7 @@ export async function POST(request: NextRequest) {
     let skipped = inputUsers.length - validUsers.length;
     let archivedWithoutLogin = 0;
     const conflicts: ImportConflict[] = [];
+    const pendingRotations: Array<{ uid: string; crmId: string; displayName: string; login: string }> = [];
 
     for (const user of validUsers) {
       let identity: Awaited<ReturnType<typeof resolveImportIdentity>>;
@@ -654,6 +688,8 @@ export async function POST(request: NextRequest) {
       const provisionedAuth = user.active &&
         classification.role !== "MANUAL_REVIEW" &&
         (!identity.existing || identity.existing.claimState === "unclaimed");
+      const rotateExistingPassword = user.active && !provisionedAuth &&
+        Boolean(identity.existing && canRotateWeeklyPassword(identity.existing));
       if (!identity.existing) {
         if (await findAuthUserById(accessToken, identity.uid) ||
             await findAuthUserByEmail(accessToken, authEmail)) {
@@ -714,6 +750,9 @@ export async function POST(request: NextRequest) {
         });
         pendingAuthIds.push(identity.uid);
       }
+      if (rotateExistingPassword) {
+        pendingRotations.push({ uid: identity.uid, crmId, displayName: user.displayName, login: effectiveLogin });
+      }
 
       importedCrmIds.add(crmId);
       importedLogins.add(normalizedLogin);
@@ -721,8 +760,6 @@ export async function POST(request: NextRequest) {
         accessUserWrite(
           identity.uid,
           { ...user, crmId, login: effectiveLogin },
-          identity.existing?.passwordResetRequested ?? false,
-          identity.existing?.passwordPolicyVersion ?? 0,
           !identity.existing,
           identity.existing?.trainingRoleManual ?? false,
           provisionedAuth
@@ -798,11 +835,33 @@ export async function POST(request: NextRequest) {
     await commitFirestoreWrites(accessToken, writes);
     pendingAuthIds.length = 0;
 
+    let rotatedPasswords = 0;
+    if (pendingRotations.length) {
+      const currentUsers = await readCurrentAccessUsers(accessToken, pendingRotations.map((item) => item.uid));
+      for (const item of pendingRotations) {
+        const current = currentUsers.get(item.uid);
+        if (!current || current.crmId !== item.crmId || !canRotateWeeklyPassword(current)) {
+          conflicts.push({ crmId: item.crmId, displayName: item.displayName, login: item.login,
+            reason: "Временный пароль не обновлён: состояние аккаунта изменилось во время импорта." });
+          continue;
+        }
+        try {
+          await identityToolkit(accessToken, "update", { localId: item.uid, password: temporaryPassword });
+          rotatedPasswords += 1;
+        } catch (error) {
+          console.error("Weekly password rotation failed", { uid: item.uid, error });
+          conflicts.push({ crmId: item.crmId, displayName: item.displayName, login: item.login,
+            reason: "Временный пароль не обновлён в Firebase Auth. Повторите импорт этого пользователя." });
+        }
+      }
+    }
+
     return json({
       created,
       updated,
       skipped,
       imported: importedCrmIds.size,
+      rotatedPasswords,
       conflicts,
       archivedWithoutLogin,
       archiveMissing: Boolean(body.archiveMissing)

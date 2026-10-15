@@ -52,6 +52,7 @@ import { TrackModal } from "@/components/TrackModal";
 import { UserLogin } from "@/components/UserLogin";
 import { PasswordChangeGate } from "@/components/PasswordChangeGate";
 import { ADMIN_EMAIL, auth, db } from "@/lib/firebase";
+import { loadAccessibleContent } from "@/lib/content-client";
 import {
   demoMaterials,
   demoTracks,
@@ -145,6 +146,7 @@ export default function Home() {
   const [videoFormatFilter, setVideoFormatFilter] = useState("Все видео");
   const [videoSort, setVideoSort] = useState("newest");
   const [videoCategories, setVideoCategories] = useState<string[]>([]);
+  const [contentLoadError, setContentLoadError] = useState(false);
 
   useEffect(() => {
     if (!auth) {
@@ -193,6 +195,10 @@ export default function Home() {
         setIsAccessLoading(false);
         window.localStorage.removeItem("travel-edu-session-start");
         setIsAdminOpen(false);
+        setMaterials([]);
+        setTracks([]);
+        setSelectedMaterial(null);
+        setSelectedTrack(null);
       }
 
       if (
@@ -214,6 +220,7 @@ export default function Home() {
     isAdmin || Boolean(accessUser?.active && !accessUser.archived && accessUser.claimState === "claimed");
   const canUsePlatform = hasAccess &&
     (isAdmin || accessUser?.passwordResetRequested !== true);
+  const contentMembershipKey = JSON.stringify([accessUser?.trainingRole, accessUser?.groupIds, accessUser?.officeIds]);
 
   useEffect(() => {
     if (!db || !canUsePlatform) return;
@@ -261,6 +268,9 @@ export default function Home() {
           normalizedLogin: data.normalizedLogin ?? "",
           displayName: data.displayName ?? data.login ?? "Пользователь",
           office: data.office ?? "",
+          officeIds: Array.isArray(data.officeIds) ? data.officeIds : [],
+          groupIds: Array.isArray(data.groupIds) ? data.groupIds : [],
+          trainingRole: data.trainingRole,
           email: data.email ?? "",
           phone: data.phone ?? "",
           role: data.role ?? "user",
@@ -362,7 +372,7 @@ export default function Home() {
   }, [accessUser?.login, canUsePlatform, user]);
 
   useEffect(() => {
-    if (!db || !canUsePlatform) {
+    if (!db || !canUsePlatform || !isAdmin) {
       return;
     }
 
@@ -400,6 +410,7 @@ export default function Home() {
             hiddenFromLibrary: data.hiddenFromLibrary === true,
             views: typeof data.views === "number" ? data.views : undefined,
             testUrl: data.testUrl ?? "",
+            audience: data.audience ?? undefined,
             createdAt,
             tab: data.tab ?? (data.type === "video" ? "webinars" : "knowledge"),
             archived: Boolean(data.archived)
@@ -413,10 +424,10 @@ export default function Home() {
         setMaterials(demoMaterials);
       }
     );
-  }, [canUsePlatform]);
+  }, [canUsePlatform, isAdmin]);
 
   useEffect(() => {
-    if (!db || !canUsePlatform) {
+    if (!db || !canUsePlatform || !isAdmin) {
       return;
     }
 
@@ -444,6 +455,7 @@ export default function Home() {
             tags: data.tags ?? [],
             coverUrl: data.coverUrl ?? "",
             testUrl: data.testUrl ?? "",
+            audience: data.audience ?? undefined,
             createdAt,
             archived: Boolean(data.archived)
           } as LearningTrack;
@@ -456,7 +468,41 @@ export default function Home() {
         setTracks(demoTracks);
       }
     );
-  }, [canUsePlatform]);
+  }, [canUsePlatform, isAdmin]);
+
+  useEffect(() => {
+    if (!user || isAdmin || !canUsePlatform) {
+      if (!isAdmin) {
+        setMaterials([]);
+        setTracks([]);
+        setSelectedMaterial(null);
+        setSelectedTrack(null);
+      }
+      return;
+    }
+    let cancelled = false;
+    let revision = 0;
+    setMaterials([]);
+    setTracks([]);
+    setContentLoadError(false);
+    const refresh = () => {
+      const currentRevision = ++revision;
+      void loadAccessibleContent(user).then((content) => {
+        if (cancelled || currentRevision !== revision) return;
+        setMaterials(content.materials);
+        setTracks(content.tracks);
+        setContentLoadError(false);
+      }).catch((error) => {
+        if (cancelled || currentRevision !== revision) return;
+        console.warn("Content could not be loaded:", error);
+        setContentLoadError(true);
+      });
+    };
+    refresh();
+    const onVisible = () => { if (document.visibilityState === "visible") refresh(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { cancelled = true; document.removeEventListener("visibilitychange", onVisible); };
+  }, [canUsePlatform, isAdmin, user, contentMembershipKey]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -828,6 +874,7 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-slate-50">
+      {contentLoadError ? <p role="alert" className="bg-red-50 px-4 py-3 text-center text-sm text-red-700">Не удалось загрузить материалы. Обновите страницу и попробуйте ещё раз.</p> : null}
       {isImpersonating ? (
         <div className="border-b border-orange-200 bg-orange-50 px-4 py-2 text-center text-sm text-slate-800">
           Вы вошли как {accessUser?.login || "сотрудник"} через администратора. Действия сохраняются от имени сотрудника.

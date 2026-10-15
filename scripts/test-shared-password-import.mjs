@@ -72,7 +72,14 @@ function profile(uid, login, claimState = "claimed") {
   };
 }
 
-function setup({ profiles = [], authUsers = [], failCommit = false } = {}) {
+function temporaryProfile(uid, login) {
+  const existing = profile(uid, login);
+  existing.fields.passwordPolicyVersion = { integerValue: "0" };
+  existing.fields.passwordResetRequested = { booleanValue: true };
+  return existing;
+}
+
+function setup({ profiles = [], authUsers = [], failCommit = false, failPasswordRotation = false, batchGetAsStream = false, onCommit } = {}) {
   const created = [];
   const updated = [];
   const deleted = [];
@@ -97,10 +104,13 @@ function setup({ profiles = [], authUsers = [], failCommit = false } = {}) {
     }
     if (url.endsWith("documents:batchGet")) {
       reads.byId += 1;
-      return ok(body.documents.map((name) => {
+      const rows = body.documents.map((name) => {
         const found = profiles.find((item) => item.name === name);
         return found ? { found } : { missing: name };
-      }));
+      });
+      return batchGetAsStream
+        ? { ok: true, text: async () => rows.map((row) => JSON.stringify(row)).join("\n") }
+        : ok(rows);
     }
     if (url.includes("documents/accessUsers") && !options.method) {
       reads.fullList += 1;
@@ -118,6 +128,7 @@ function setup({ profiles = [], authUsers = [], failCommit = false } = {}) {
     }
     if (url.endsWith("accounts:update")) {
       updated.push(body);
+      if (body.password && failPasswordRotation) return fail();
       return ok({ localId: body.localId });
     }
     if (url.endsWith("accounts:delete")) {
@@ -127,6 +138,7 @@ function setup({ profiles = [], authUsers = [], failCommit = false } = {}) {
     }
     if (url.endsWith("documents:commit")) {
       commits.push(body);
+      if (!failCommit) onCommit?.(profiles, body);
       return failCommit ? fail() : ok();
     }
     throw new Error(`Unexpected URL: ${url}`);
@@ -208,7 +220,70 @@ test("repeat import preserves an existing password and UID", async () => {
   assert.equal(state.created.length, 0);
   assert.equal(state.updated.length, 1);
   assert.equal("password" in state.updated[0], false);
-  assert.equal(state.commits[0].writes[0].update.fields.passwordResetRequested.booleanValue, false);
+  assert.equal("passwordResetRequested" in state.commits[0].writes[0].update.fields, false);
+});
+
+test("weekly import replaces only the previous CRM temporary password", async () => {
+  const state = setup({
+    profiles: [temporaryProfile("crm-1", "first")],
+    authUsers: [{ localId: "crm-1", email: "old@example.invalid", password: "LastWeek1" }],
+    batchGetAsStream: true
+  });
+  const response = await importUsers([user("crm-1", "first")], "NewWeek2");
+  assert.equal(response.status, 200);
+  assert.equal(response.data.rotatedPasswords, 1, JSON.stringify(response.data));
+  assert.deepEqual(state.updated.filter((item) => item.password).map((item) => item.password), ["NewWeek2"]);
+  assert.equal("passwordResetRequested" in state.commits[0].writes[0].update.fields, false);
+  assert.equal("passwordPolicyVersion" in state.commits[0].writes[0].update.fields, false);
+});
+
+test("weekly import leaves admin-reset and manually created account passwords untouched", async () => {
+  const adminReset = temporaryProfile("crm-1", "first");
+  adminReset.fields.passwordPolicyVersion = { integerValue: "1" };
+  const manual = temporaryProfile("crm-2", "second");
+  manual.fields.source = { stringValue: "manual" };
+  const state = setup({
+    profiles: [adminReset, manual],
+    authUsers: [
+      { localId: "crm-1", email: "first@example.invalid" },
+      { localId: "crm-2", email: "second@example.invalid" }
+    ]
+  });
+  const response = await importUsers([user("crm-1", "first"), user("crm-2", "second")], "NewWeek2");
+  assert.equal(response.status, 200);
+  assert.equal(response.data.rotatedPasswords, 0);
+  assert.equal(state.updated.some((item) => "password" in item), false);
+});
+
+test("weekly import skips rotation when a personal password was set during import", async () => {
+  const existing = temporaryProfile("crm-1", "first");
+  const state = setup({
+    profiles: [existing],
+    authUsers: [{ localId: "crm-1", email: "old@example.invalid" }],
+    onCommit: () => {
+      existing.fields.passwordResetRequested = { booleanValue: false };
+      existing.fields.passwordPolicyVersion = { integerValue: "1" };
+      existing.fields.passwordChangedAt = { timestampValue: new Date().toISOString() };
+    }
+  });
+  const response = await importUsers([user("crm-1", "first")], "NewWeek2");
+  assert.equal(response.status, 200);
+  assert.equal(response.data.rotatedPasswords, 0);
+  assert.equal(response.data.conflicts.length, 1);
+  assert.equal(state.updated.some((item) => "password" in item), false);
+});
+
+test("failed weekly password rotation is reported without claiming success", async () => {
+  const state = setup({
+    profiles: [temporaryProfile("crm-1", "first")],
+    authUsers: [{ localId: "crm-1", email: "old@example.invalid" }],
+    failPasswordRotation: true
+  });
+  const response = await importUsers([user("crm-1", "first")], "NewWeek2");
+  assert.equal(response.status, 200);
+  assert.equal(response.data.rotatedPasswords, 0);
+  assert.equal(response.data.conflicts.length, 1);
+  assert.equal(state.updated.some((item) => item.password === "NewWeek2"), true, JSON.stringify(response.data));
 });
 
 test("repeat import preserves a manually assigned training role", async () => {

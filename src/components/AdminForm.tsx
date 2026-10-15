@@ -60,9 +60,11 @@ import { TrackInfoEditor } from "@/components/TrackInfoEditor";
 import { TrackPreview } from "@/components/TrackPreview";
 import { TrackMaterialPicker } from "@/components/TrackMaterialPicker";
 import { TrainingGroupsWorkspace } from "@/components/TrainingGroupsWorkspace";
+import { AUDIENCE_ROLES } from "@/lib/content-access";
 import { UnsavedEditorProvider, useEditorDraft, useEditorNavigation } from "@/components/UnsavedEditor";
 import type {
   ContentTab,
+  ContentAudience,
   LearningTrack,
   Material,
   MaterialType,
@@ -146,6 +148,7 @@ type ImportHistoryItem = {
   imported: number;
   created: number;
   updated: number;
+  rotatedPasswords?: number;
   skipped: number;
   archiveMissing: boolean;
   createdAt: Date;
@@ -158,6 +161,7 @@ const trendingStampOptions: TrendingStamp[] = [
 ];
 
 const initialMaterialForm = {
+  audience: { mode: "everyone", roles: [], groupIds: [] } as ContentAudience,
   hiddenFromLibrary: false,
   title: "",
   description: "",
@@ -175,6 +179,7 @@ const initialMaterialForm = {
 };
 
 const initialTrackForm = {
+  audience: { mode: "everyone", roles: [], groupIds: [] } as ContentAudience,
   infoBlocks: [] as TrackInfoBlock[],
   title: "",
   description: "",
@@ -567,6 +572,7 @@ function AdminWorkspace({
           imported: Number(data.imported ?? 0),
           created: Number(data.created ?? 0),
           updated: Number(data.updated ?? 0),
+          rotatedPasswords: Number(data.rotatedPasswords ?? 0),
           skipped: Number(data.skipped ?? 0),
           archiveMissing: data.archiveMissing === true,
           createdAt
@@ -702,6 +708,7 @@ function AdminWorkspace({
 
     try {
       await addDoc(collection(db, "materials"), {
+        audience: materialForm.audience,
         title: materialForm.title.trim(),
         hiddenFromLibrary: materialForm.hiddenFromLibrary,
         description: materialForm.description.trim(),
@@ -752,6 +759,7 @@ function AdminWorkspace({
 
     try {
       await addDoc(collection(db, "tracks"), {
+        audience: trackForm.audience,
         title: trackForm.title.trim(),
         description: trackForm.description.trim(),
         coverUrl: trackForm.coverUrl.trim(),
@@ -1032,7 +1040,7 @@ function AdminWorkspace({
 
     if (
       !window.confirm(
-        `Подтвердите обработку ${importPreview.validUsers.length} записей. Новые пользователи войдут с общим временным паролем и обязаны будут заменить его личным. Пароли и прогресс существующих пользователей сохранятся.`
+        `Подтвердите обработку ${importPreview.validUsers.length} записей. Новые пользователи получат общий временный пароль. У импортированных сотрудников, которые ещё не установили личный пароль, прежний временный пароль заменится новым. Личные пароли, пароли после сброса администратором, пароли ручных аккаунтов и прогресс сохранятся.`
       )
     ) {
       return;
@@ -1073,6 +1081,7 @@ function AdminWorkspace({
           importPreview.duplicateLogins +
           importPreview.conflictingIds,
         imported: 0,
+        rotatedPasswords: 0,
         archivedWithoutLogin: 0
       };
       const conflicts: ImportConflict[] = [];
@@ -1120,6 +1129,7 @@ function AdminWorkspace({
           updated?: number;
           skipped?: number;
           imported?: number;
+          rotatedPasswords?: number;
           archivedWithoutLogin?: number;
           conflicts?: ImportConflict[];
         };
@@ -1136,6 +1146,7 @@ function AdminWorkspace({
         result.updated += batchResult.updated ?? 0;
         result.skipped += batchResult.skipped ?? 0;
         result.imported += batchResult.imported ?? 0;
+        result.rotatedPasswords += batchResult.rotatedPasswords ?? 0;
         result.archivedWithoutLogin += batchResult.archivedWithoutLogin ?? 0;
         conflicts.push(...(batchResult.conflicts ?? []));
       }
@@ -1144,7 +1155,7 @@ function AdminWorkspace({
       setMessage(
         `Импорт завершен. Импортировано: ${result.imported ?? 0}, создано: ${
           result.created ?? 0
-        }, обновлено: ${result.updated ?? 0}, архивировано по ID без логина: ${result.archivedWithoutLogin}, пропущено: ${result.skipped ?? 0}. Конфликтных аккаунтов для ручной проверки: ${conflicts.length}.`
+        }, обновлено: ${result.updated ?? 0}, временных паролей заменено: ${result.rotatedPasswords}, архивировано по ID без логина: ${result.archivedWithoutLogin}, пропущено: ${result.skipped ?? 0}. Конфликтных аккаунтов для ручной проверки: ${conflicts.length}.`
       );
       setImportTemporaryPassword("");
       try {
@@ -1155,6 +1166,7 @@ function AdminWorkspace({
             imported: result.imported ?? 0,
             created: result.created ?? 0,
             updated: result.updated ?? 0,
+            rotatedPasswords: result.rotatedPasswords,
             skipped: result.skipped ?? 0,
             archiveMissing: !importPreview.isActiveUsersReport && importArchiveMissing,
             createdAt: serverTimestamp()
@@ -1312,6 +1324,7 @@ function AdminWorkspace({
                 ) : addMode === "track" ? (
                   <TrackCreateForm
                     form={trackForm}
+                    groups={trainingGroups}
                     materials={materials}
                     selectedIds={trackMaterialIds}
                     isSubmitting={isSubmitting}
@@ -1325,6 +1338,7 @@ function AdminWorkspace({
                 ) : (
                   <MaterialCreateForm
                     mode={addMode}
+                    groups={trainingGroups}
                     form={materialForm}
                     allTopicOptions={allTopicOptions}
                     onAddCategory={addVideoCategory}
@@ -1342,6 +1356,7 @@ function AdminWorkspace({
                   selectedId={selectedEntityId}
                   materials={materials}
                   tracks={tracks}
+                  groups={trainingGroups}
                   allTopicOptions={allTopicOptions}
                   onAddCategory={addVideoCategory}
                   onModeChange={(mode) => navigate(() => {
@@ -1489,6 +1504,7 @@ function AddChoice({
 function MaterialCreateForm({
   mode,
   form,
+  groups,
   allTopicOptions,
   onAddCategory,
   formatDatalist,
@@ -1499,6 +1515,7 @@ function MaterialCreateForm({
 }: {
   mode: Exclude<AddMode, "menu" | "track">;
   form: typeof initialMaterialForm;
+  groups: TrainingGroup[];
   allTopicOptions: string[];
   onAddCategory: (name: string) => Promise<string | null>;
   formatDatalist: string[];
@@ -1657,6 +1674,7 @@ function MaterialCreateForm({
           <input type="checkbox" checked={form.hiddenFromLibrary} onChange={(event) => onFormChange({ ...form, hiddenFromLibrary: event.target.checked })} />
           {isWebinar ? "Скрывать из Видеотеки" : "Скрывать из библиотеки"}
         </label>
+        <AudiencePicker audience={form.audience} groups={groups} onChange={(audience) => onFormChange({ ...form, audience })} />
       </div>
       <SubmitButton isSubmitting={isSubmitting} label="Добавить материал" />
     </form>
@@ -1665,6 +1683,7 @@ function MaterialCreateForm({
 
 function TrackCreateForm({
   form,
+  groups,
   materials,
   selectedIds,
   isSubmitting,
@@ -1676,6 +1695,7 @@ function TrackCreateForm({
   onMoveMaterial
 }: {
   form: typeof initialTrackForm;
+  groups: TrainingGroup[];
   materials: Material[];
   selectedIds: string[];
   isSubmitting: boolean;
@@ -1738,6 +1758,7 @@ function TrackCreateForm({
               className="mt-2 w-full resize-none rounded-lg border border-slate-200 px-3 py-2.5 text-slate-900 outline-none transition focus:border-[#ea6a00] focus:ring-2 focus:ring-orange-100"
             />
           </label>
+          <AudiencePicker audience={form.audience} groups={groups} onChange={(audience) => onFormChange({ ...form, audience })} />
         </div>
 
         <TrackMaterialPicker materials={materials} selectedIds={selectedIds} onToggle={onToggleMaterial} onMove={onMoveMaterial} />
@@ -1924,6 +1945,7 @@ function CrmImportPanel({
             {formatDate(lastImport.createdAt)} · {lastImport.actor || "администратор"} ·
             импортировано: {lastImport.imported}, создано: {lastImport.created},
             обновлено: {lastImport.updated}, пропущено: {lastImport.skipped}
+            {lastImport.rotatedPasswords ? ` · временных паролей заменено: ${lastImport.rotatedPasswords}` : ""}
             {lastImport.archiveMissing ? " · архивация отсутствующих включалась" : ""}
           </p>
           {lastImport.fileName ? (
@@ -2616,6 +2638,7 @@ function ArchiveWorkspace({
   selectedId,
   materials,
   tracks,
+  groups,
   allTopicOptions,
   onAddCategory,
   onModeChange,
@@ -2630,6 +2653,7 @@ function ArchiveWorkspace({
   selectedId: string | null;
   materials: Material[];
   tracks: LearningTrack[];
+  groups: TrainingGroup[];
   allTopicOptions: string[];
   onAddCategory: (name: string) => Promise<string | null>;
   onModeChange: (mode: ArchiveMode) => void;
@@ -2730,6 +2754,7 @@ function ArchiveWorkspace({
           <MaterialEditor
             key={selectedMaterial.id}
             material={selectedMaterial}
+            groups={groups}
             allTopicOptions={allTopicOptions}
             onAddCategory={onAddCategory}
             onUpdate={onUpdateMaterial}
@@ -2739,6 +2764,7 @@ function ArchiveWorkspace({
           <TrackEditor
             key={selectedTrack.id}
             track={selectedTrack}
+            groups={groups}
             materials={materials}
             onUpdate={onUpdateTrack}
             onDelete={(id) => onDelete("tracks", id)}
@@ -2755,12 +2781,14 @@ function ArchiveWorkspace({
 
 function MaterialEditor({
   material,
+  groups,
   allTopicOptions,
   onAddCategory,
   onUpdate,
   onDelete
 }: {
   material: Material;
+  groups: TrainingGroup[];
   allTopicOptions: string[];
   onAddCategory: (name: string) => Promise<string | null>;
   onUpdate: (id: string, payload: Partial<Material>) => Promise<boolean>;
@@ -2768,6 +2796,7 @@ function MaterialEditor({
 }) {
   const [title, setTitle] = useState(material.title);
   const [hiddenFromLibrary, setHiddenFromLibrary] = useState(material.hiddenFromLibrary ?? false);
+  const [audience, setAudience] = useState<ContentAudience>(material.audience ?? { mode: "everyone", roles: [], groupIds: [] });
   const [description, setDescription] = useState(material.description);
   const [tags, setTags] = useState((material.tags ?? []).join(", "));
   const [category, setCategory] = useState(material.category.join(", "));
@@ -2784,12 +2813,13 @@ function MaterialEditor({
     material.trendingStamp ?? ""
   );
   const navigate = useEditorNavigation();
-  const payload = { hiddenFromLibrary, title, description, url, testUrl, coverUrl, format, duration,
+  const payload = { hiddenFromLibrary, audience, title, description, url, testUrl, coverUrl, format, duration,
     category: material.tab === "webinars" ? splitCategories(category, allTopicOptions) : splitList(category), tags: splitList(tags),
     ...(material.tab === "webinars" ? { author: { name: speakerName, company: speakerCompany }, trendingStamp: trendingStamp || null } : {}) };
   const save = useEditorDraft(payload, () => onUpdate(material.id, payload), () => {
     setTitle(material.title); setDescription(material.description); setUrl(material.url);
     setHiddenFromLibrary(material.hiddenFromLibrary ?? false); setTestUrl(material.testUrl ?? "");
+    setAudience(material.audience ?? { mode: "everyone", roles: [], groupIds: [] });
     setCoverUrl(material.coverUrl ?? ""); setFormat(material.tab === "webinars" ? videoFormat(material.format) : material.format);
     setDuration(material.duration);
     setCategory(material.category.join(", ")); setTags((material.tags ?? []).join(", "));
@@ -2804,6 +2834,7 @@ function MaterialEditor({
         <input type="checkbox" checked={hiddenFromLibrary} onChange={(event) => setHiddenFromLibrary(event.target.checked)} />
         {material.tab === "webinars" ? "Скрывать из Видеотеки" : "Скрывать из библиотеки"}
       </label>
+      <AudiencePicker audience={audience} groups={groups} onChange={setAudience} />
       <div className="grid gap-4 md:grid-cols-2">
         <TextField label="Название" value={title} onChange={setTitle} />
         {material.tab === "webinars" ? (
@@ -2880,11 +2911,13 @@ function MaterialEditor({
 
 function TrackEditor({
   track,
+  groups,
   materials,
   onUpdate,
   onDelete
 }: {
   track: LearningTrack;
+  groups: TrainingGroup[];
   materials: Material[];
   onUpdate: (id: string, payload: Partial<LearningTrack>) => Promise<boolean>;
   onDelete: (id: string) => Promise<void>;
@@ -2895,13 +2928,15 @@ function TrackEditor({
   const [coverUrl, setCoverUrl] = useState(track.coverUrl ?? "");
   const [testUrl, setTestUrl] = useState(track.testUrl ?? "");
   const [selectedIds, setSelectedIds] = useState(track.materialIds);
+  const [audience, setAudience] = useState<ContentAudience>(track.audience ?? { mode: "everyone", roles: [], groupIds: [] });
   const [infoBlocks, setInfoBlocks] = useState(track.infoBlocks ?? []);
   const navigate = useEditorNavigation();
-  const payload = { title, description, coverUrl, testUrl, tags: splitList(tags), materialIds: selectedIds, infoBlocks };
+  const payload = { title, description, coverUrl, testUrl, tags: splitList(tags), materialIds: selectedIds, infoBlocks, audience };
   const save = useEditorDraft(payload, () => onUpdate(track.id, payload), () => {
     setTitle(track.title); setDescription(track.description); setCoverUrl(track.coverUrl ?? "");
     setTestUrl(track.testUrl ?? ""); setTags((track.tags ?? []).join(", "));
     setSelectedIds(track.materialIds); setInfoBlocks(track.infoBlocks ?? []);
+    setAudience(track.audience ?? { mode: "everyone", roles: [], groupIds: [] });
   });
 
   function toggleMaterial(id: string) {
@@ -2943,6 +2978,7 @@ function TrackEditor({
           />
         </label>
       </div>
+      <AudiencePicker audience={audience} groups={groups} onChange={setAudience} />
       <TrackMaterialPicker
         materials={materials}
         selectedIds={selectedIds}
@@ -2961,6 +2997,48 @@ function TrackEditor({
   );
 }
 
+
+function AudiencePicker({ audience, groups, onChange }: {
+  audience: ContentAudience;
+  groups: TrainingGroup[];
+  onChange: (audience: ContentAudience) => void;
+}) {
+  return <fieldset className="min-w-0 rounded-lg border border-slate-200 p-4">
+    <legend className="px-1 text-sm font-semibold text-slate-800">Доступ к контенту</legend>
+    <label className="block text-sm text-slate-700">Показывать
+      <select value={audience.mode} onChange={(event) => onChange({ ...audience, mode: event.target.value as ContentAudience["mode"] })}
+        className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-slate-900">
+        <option value="everyone">Всем сотрудникам</option>
+        <option value="restricted">Выбранным ролям или группам</option>
+      </select>
+    </label>
+    {audience.mode === "restricted" ? <div className="mt-4 space-y-4">
+      <div>
+        <p className="text-sm font-medium text-slate-700">Роли</p>
+        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-2">
+          {AUDIENCE_ROLES.map((role) => <label key={role} className="inline-flex items-center gap-2 text-sm text-slate-700">
+            <input type="checkbox" checked={audience.roles.includes(role)} className="accent-[#ea6a00]"
+              onChange={(event) => onChange({ ...audience, roles: event.target.checked
+                ? [...audience.roles, role] : audience.roles.filter((item) => item !== role) })} />
+            {TRAINING_ROLE_LABELS[role]}
+          </label>)}
+        </div>
+      </div>
+      {groups.length ? <div>
+        <p className="text-sm font-medium text-slate-700">Группы</p>
+        <div className="mt-2 max-h-44 space-y-2 overflow-y-auto">
+          {groups.map((group) => <label key={group.id} className="flex items-center gap-2 text-sm text-slate-700">
+            <input type="checkbox" checked={audience.groupIds.includes(group.id)} disabled={group.archived}
+              className="accent-[#ea6a00]" onChange={(event) => onChange({ ...audience, groupIds: event.target.checked
+                ? [...audience.groupIds, group.id] : audience.groupIds.filter((id) => id !== group.id) })} />
+            {group.name}{group.archived ? " · архив" : ""}
+          </label>)}
+        </div>
+      </div> : null}
+      <p className="text-xs text-slate-500">Достаточно совпадения одной роли или группы. Если ничего не выбрать, контент увидит только администратор. Трек не показывается сотруднику, если хотя бы один его материал ему недоступен; проверьте аудиторию материалов отдельно.</p>
+    </div> : null}
+  </fieldset>;
+}
 
 function FormHeader({ title, onBack }: { title: string; onBack: () => void }) {
   return (

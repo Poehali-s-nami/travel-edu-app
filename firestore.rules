@@ -24,7 +24,8 @@ service cloud.firestore {
     }
 
     match /materials/{materialId} {
-      allow read: if isActiveUser();
+      // Staff content is served by /api/content after audience checks.
+      allow read: if isAdmin();
       allow create, delete: if isAdmin();
       allow update: if isAdmin()
         || (
@@ -41,7 +42,7 @@ service cloud.firestore {
     }
 
     match /tracks/{trackId} {
-      allow read: if isActiveUser();
+      allow read: if isAdmin();
       allow write: if isAdmin();
     }
 

@@ -13,6 +13,7 @@ import {
 } from "@/components/PersonalCabinet";
 import { UserLogin } from "@/components/UserLogin";
 import { ADMIN_EMAIL, auth, db } from "@/lib/firebase";
+import { loadAccessibleContent } from "@/lib/content-client";
 import type { AccessUser } from "@/types/access-user";
 import type { TrainingGroup } from "@/types/training-group";
 
@@ -30,6 +31,7 @@ export default function CabinetPage() {
   const [groupsError, setGroupsError] = useState(false);
   const [studyLoaded, setStudyLoaded] = useState(false);
   const [studyError, setStudyError] = useState(false);
+  const contentMembershipKey = JSON.stringify([profile?.trainingRole, profile?.groupIds, profile?.officeIds]);
 
   useEffect(() => {
     if (!auth) {
@@ -67,6 +69,7 @@ export default function CabinetPage() {
             office: data.office ?? "",
             officeIds: Array.isArray(data.officeIds) ? data.officeIds : [],
             groupIds: Array.isArray(data.groupIds) ? data.groupIds : [],
+            trainingRole: data.trainingRole,
             email: data.email ?? "",
             phone: data.phone ?? "",
             role: data.role ?? "user",
@@ -94,8 +97,10 @@ export default function CabinetPage() {
   }, [user]);
 
   useEffect(() => {
-    if (!user || !db || !profile?.active || profile.archived || profile.passwordResetRequested) {
+    if (!user || !db || !profile?.active || profile.archived || profile.passwordResetRequested || profile.claimState !== "claimed") {
       setStudyLoaded(false);
+      setMaterials([]);
+      setTracks([]);
       return;
     }
     const firestore = db;
@@ -125,48 +130,30 @@ export default function CabinetPage() {
       },
       onError("progress")
     );
-    const unsubMaterials = onSnapshot(
-      collection(firestore, "materials"),
-      (snapshot) => {
-        setMaterials(snapshot.docs.map((item) => {
-          const data = item.data();
-          return {
-            id: item.id,
-            title: String(data.title ?? "Материал"),
-            description: String(data.description ?? ""),
-            type: data.type === "file" ? "file" as const : "video" as const,
-            archived: data.archived === true
-          };
-        }));
-        markLoaded("materials");
-      },
-      onError("materials")
-    );
-    const unsubTracks = onSnapshot(
-      collection(firestore, "tracks"),
-      (snapshot) => {
-        setTracks(snapshot.docs.map((item) => {
-          const data = item.data();
-          return {
-            id: item.id,
-            title: String(data.title ?? "Обучающий трек"),
-            description: String(data.description ?? ""),
-            materialIds: Array.isArray(data.materialIds)
-              ? data.materialIds.filter((id: unknown): id is string => typeof id === "string")
-              : [],
-            archived: data.archived === true
-          };
-        }));
-        markLoaded("tracks");
-      },
-      onError("tracks")
-    );
+    let cancelled = false;
+    setMaterials([]);
+    setTracks([]);
+    void loadAccessibleContent(user).then((content) => {
+      if (cancelled) return;
+      setMaterials(content.materials.map((item) => ({
+        id: item.id, title: item.title, description: item.description, type: item.type, archived: item.archived
+      })));
+      setTracks(content.tracks.map((item) => ({
+        id: item.id, title: item.title, description: item.description,
+        materialIds: item.materialIds, archived: item.archived
+      })));
+      markLoaded("materials");
+      markLoaded("tracks");
+    }).catch(() => {
+      if (cancelled) return;
+      onError("materials")();
+      markLoaded("tracks");
+    });
     return () => {
+      cancelled = true;
       unsubProgress();
-      unsubMaterials();
-      unsubTracks();
     };
-  }, [user, profile?.active, profile?.archived, profile?.passwordResetRequested]);
+  }, [user, profile?.active, profile?.archived, profile?.passwordResetRequested, profile?.claimState, contentMembershipKey]);
 
   useEffect(() => {
     if (!user || !db || !profile?.active || profile.archived || profile.passwordResetRequested) {

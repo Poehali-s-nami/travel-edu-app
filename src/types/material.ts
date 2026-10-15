@@ -2,6 +2,12 @@ export type MaterialType = "video" | "file";
 export type ContentTab = "webinars" | "knowledge" | "tracks";
 export type TrendingStamp = "Must read" | "Полезно знать" | "Горячий выпуск";
 
+export type ContentAudience = {
+  mode: "everyone" | "restricted";
+  roles: Array<"HEAD" | "MANAGER" | "EMPLOYEE" | "PARTNER">;
+  groupIds: string[];
+};
+
 export type Material = {
   id: string;
   title: string;
@@ -24,6 +30,7 @@ export type Material = {
   trendingStamp?: TrendingStamp | null;
   views?: number;
   testUrl?: string;
+  audience?: ContentAudience;
 };
 
 export type TrackInfoBlock = {
@@ -45,6 +52,7 @@ export type LearningTrack = {
   createdAt: Date;
   archived?: boolean;
   testUrl?: string;
+  audience?: ContentAudience;
 };
 
 export type FilterState = {
