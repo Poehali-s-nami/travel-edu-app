@@ -3,11 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "node scripts/dev-with-firebase.mjs",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "sync:users": "node scripts/sync-crm-users.mjs"
+    "sync:users": "node scripts/sync-crm-users.mjs",
+    "test:roles": "node --test scripts/test-training-roles.mjs",
+    "test:import": "node --test scripts/test-shared-password-import.mjs",
+    "test:password": "node --test scripts/test-password-change.mjs",
+    "test:roles-admin": "node --test scripts/test-admin-training-role.mjs",
+    "test:groups": "node --test scripts/test-training-groups.mjs"
   },
   "dependencies": {
     "firebase": "^11.0.2",

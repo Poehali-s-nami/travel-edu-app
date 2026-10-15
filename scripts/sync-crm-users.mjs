@@ -45,7 +45,8 @@ Supported CSV columns:
 Notes:
   id is required. If login is empty, the import uses the user's full name as the login.
   If a folder is passed, the newest XLSX/CSV/TSV file in that folder is used.
-  --dry-run checks the export without writing anything to Firebase.
+  --dry-run checks the legacy export without writing anything to Firebase.
+  Multi-office exports with ID офиса and Доступ в CRM are imported only through the admin UI.
   --archive-missing disables users that are absent from the new CRM export.
   Blocked users from the export are skipped and are not created in Firebase.
 `);
@@ -283,6 +284,11 @@ const resolvedInputPath = await resolveInputPath(inputPath);
 const rows = await readInputRows(resolvedInputPath);
 const headerRowIndex = findHeaderRowIndex(rows);
 const headers = (rows[headerRowIndex] ?? []).map(normalizeHeader);
+const isMultiOfficeReport = headers.includes(normalizeHeader("ID офиса")) &&
+  headers.includes(normalizeHeader("Доступ в CRM"));
+if (isMultiOfficeReport && !dryRun) {
+  throw new Error("Многоофисную CRM-выгрузку импортируйте через админку PSN Hub: старый CLI пропускает дополнительные офисы.");
+}
 const records = rows.slice(headerRowIndex + 1).map((values) =>
   Object.fromEntries(headers.map((header, index) => [header, values[index] ?? ""]))
 );
@@ -336,6 +342,10 @@ function extractUserRecord(record, rowNumber) {
 }
 
 if (dryRun) {
+  if (isMultiOfficeReport) {
+    console.log("Это многоофисная выгрузка. Предпросмотр и импорт доступны в админке PSN Hub; старый CLI не применяется.");
+    process.exit(0);
+  }
   const users = records.map((record, index) =>
     extractUserRecord(record, headerRowIndex + index + 2)
   );
@@ -392,7 +402,7 @@ async function flushBatch() {
   pendingWrites = 0;
 }
 
-async function syncAuthUser(crmId, userPayload) {
+async function syncAuthUser(crmId, userPayload, initialPassword) {
   try {
     await withRetry(`Firebase Auth get user ${crmId}`, () => auth.getUser(crmId));
     await withRetry(`Firebase Auth update user ${crmId}`, () =>
@@ -407,7 +417,7 @@ async function syncAuthUser(crmId, userPayload) {
 
   try {
     await withRetry(`Firebase Auth create user ${crmId}`, () =>
-      auth.createUser({ uid: crmId, ...userPayload })
+      auth.createUser({ uid: crmId, ...userPayload, password: initialPassword })
     );
     return { status: "created", uid: crmId };
   } catch (error) {
@@ -469,20 +479,17 @@ for (const [index, record] of records.entries()) {
     continue;
   }
 
-  const needsPasswordMigration =
-    active && Number(existingAccess?.passwordPolicyVersion ?? 0) < 1;
   const userPayload = {
     email: authEmail,
     displayName: displayName || login,
-    disabled: !active,
-    ...(needsPasswordMigration ? { password: weeklyAccessCode } : {})
+    disabled: !active
   };
 
   let isNewUser = false;
   let userRefId = crmId;
 
   try {
-    const result = await syncAuthUser(crmId, userPayload);
+    const result = await syncAuthUser(crmId, userPayload, weeklyAccessCode);
     isNewUser = result.status === "created";
     if (result.status === "created") {
       created += 1;
@@ -514,13 +521,10 @@ for (const [index, record] of records.entries()) {
       archived: !active,
       manual: false,
       source: "crm",
-      passwordResetRequested: needsPasswordMigration
+      passwordResetRequested: isNewUser
         ? true
         : existingAccess?.passwordResetRequested === true,
-      passwordPolicyVersion: Math.max(
-        Number(existingAccess?.passwordPolicyVersion ?? 0),
-        needsPasswordMigration ? 1 : 0
-      ),
+      passwordPolicyVersion: Number(existingAccess?.passwordPolicyVersion ?? 0),
       updatedAt: FieldValue.serverTimestamp(),
       ...(isNewUser
         ? { role: "user", createdAt: FieldValue.serverTimestamp() }

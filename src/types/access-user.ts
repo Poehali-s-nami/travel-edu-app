@@ -1,4 +1,5 @@
 export type AccessUserRole = "user" | "manager" | "admin";
+export type TrainingRole = "HEAD" | "MANAGER" | "EMPLOYEE" | "PARTNER" | "MANUAL_REVIEW" | "ADMIN";
 
 export type AccessUser = {
   id: string;
@@ -7,9 +8,16 @@ export type AccessUser = {
   normalizedLogin: string;
   displayName: string;
   office?: string;
+  officeIds?: string[];
+  officeLinks?: Array<{ id: string; name: string; city: string }>;
+  groupIds?: string[];
   email?: string;
   phone?: string;
   role: AccessUserRole;
+  trainingRole?: TrainingRole;
+  trainingRoleManual?: boolean;
+  crmUserTypes?: string[];
+  claimState?: "unclaimed" | "claiming" | "claimed" | "manual_review";
   active: boolean;
   archived: boolean;
   manual?: boolean;

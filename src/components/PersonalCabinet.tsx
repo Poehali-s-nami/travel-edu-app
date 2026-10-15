@@ -6,12 +6,15 @@ import Image from "next/image";
 import { EmailAuthProvider, getIdTokenResult, reauthenticateWithCredential, User } from "firebase/auth";
 import { ArrowLeft, BookOpen, CheckCircle2, ChevronDown, FolderOpen, KeyRound, LogOut, UserRound } from "lucide-react";
 import type { AccessUser } from "@/types/access-user";
+import type { TrainingGroup } from "@/types/training-group";
+import { assignedGroupContent } from "@/lib/training-groups";
 
 export type CabinetMaterial = {
   id: string;
   title: string;
   description: string;
   type: "video" | "file";
+  archived?: boolean;
 };
 
 export type CabinetTrack = {
@@ -19,6 +22,7 @@ export type CabinetTrack = {
   title: string;
   description: string;
   materialIds: string[];
+  archived?: boolean;
 };
 
 export type CabinetProgress = {
@@ -35,6 +39,9 @@ export function PersonalCabinet({
   tracks,
   materials,
   progress,
+  groups,
+  groupsLoaded,
+  groupsError,
   studyLoaded,
   studyError,
   onSignOut
@@ -44,12 +51,15 @@ export function PersonalCabinet({
   tracks: CabinetTrack[];
   materials: CabinetMaterial[];
   progress: CabinetProgress[];
+  groups: TrainingGroup[];
+  groupsLoaded: boolean;
+  groupsError: boolean;
   studyLoaded: boolean;
   studyError: boolean;
   onSignOut: () => void;
 }) {
   const [tab, setTab] = useState<"profile" | "learning">("profile");
-  const [learningTab, setLearningTab] = useState<"tracks" | "materials">("tracks");
+  const [learningTab, setLearningTab] = useState<"assigned" | "tracks" | "materials">("assigned");
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
@@ -65,6 +75,9 @@ export function PersonalCabinet({
     (track) => track.materialIds.length > 0 && track.materialIds.every((id) => completedIds.has(id))
   );
   const materialById = new Map(materials.map((material) => [material.id, material]));
+  const assigned = assignedGroupContent(profile, groups);
+  const assignedTracks = assigned.trackIds.map((id) => tracks.find((track) => track.id === id)).filter((track): track is CabinetTrack => Boolean(track && !track.archived));
+  const assignedMaterials = assigned.materialIds.map((id) => materialById.get(id)).filter((material): material is CabinetMaterial => Boolean(material && !material.archived));
 
   async function changePassword(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -176,16 +189,35 @@ export function PersonalCabinet({
             <div className="flex flex-wrap items-end justify-between gap-4">
               <div>
                 <h2 className="text-base font-semibold text-slate-950">Моё обучение</h2>
-                <p className="mt-1 text-sm text-slate-500">Завершенные треки и изученные материалы</p>
+                <p className="mt-1 text-sm text-slate-500">Назначенное и завершённое обучение</p>
               </div>
-              <div className="inline-flex rounded-lg border border-slate-200 bg-white p-1" role="group" aria-label="Тип изученного">
+              <div className="flex flex-wrap rounded-lg border border-slate-200 bg-white p-1" role="group" aria-label="Тип обучения">
+                <button type="button" onClick={() => setLearningTab("assigned")} className={`inline-flex min-h-9 items-center gap-2 rounded-md px-3 text-sm font-medium ${learningTab === "assigned" ? "bg-orange-50 text-[#c95b00]" : "text-slate-600 hover:bg-slate-50"}`}><BookOpen size={16} /> Назначено</button>
                 <button type="button" onClick={() => setLearningTab("tracks")} className={`inline-flex min-h-9 items-center gap-2 rounded-md px-3 text-sm font-medium ${learningTab === "tracks" ? "bg-orange-50 text-[#c95b00]" : "text-slate-600 hover:bg-slate-50"}`}><FolderOpen size={16} /> Треки {studyLoaded ? completedTracks.length : ""}</button>
                 <button type="button" onClick={() => setLearningTab("materials")} className={`inline-flex min-h-9 items-center gap-2 rounded-md px-3 text-sm font-medium ${learningTab === "materials" ? "bg-orange-50 text-[#c95b00]" : "text-slate-600 hover:bg-slate-50"}`}><BookOpen size={16} /> Материалы {studyLoaded ? progress.length : ""}</button>
               </div>
             </div>
 
-            {!studyLoaded ? <p className="mt-8 text-sm text-slate-500">Загружаем историю обучения...</p> : null}
+            {!studyLoaded || !groupsLoaded ? <p className="mt-8 text-sm text-slate-500">Загружаем обучение...</p> : null}
             {studyError ? <p role="status" className="mt-4 text-sm text-red-700">Не удалось загрузить часть истории обучения. Обновите страницу.</p> : null}
+            {groupsError ? <p role="status" className="mt-4 text-sm text-red-700">Не удалось загрузить назначения групп. Проверьте правила Firestore.</p> : null}
+            {studyLoaded && groupsLoaded && learningTab === "assigned" ? (
+              assignedTracks.length || assignedMaterials.length ? <div className="mt-6 space-y-7">
+                <div className="flex flex-wrap gap-2">{assigned.groups.map((group) => <span key={group.id} className="rounded-md bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">{group.name}</span>)}</div>
+                {assignedTracks.length ? <div><h3 className="text-sm font-semibold text-slate-900">Обучающие треки</h3><div className="mt-2 divide-y divide-slate-200 border-y border-slate-200">
+                  {assignedTracks.map((track) => <div key={track.id} className="flex flex-wrap items-center justify-between gap-3 py-4">
+                    <div className="min-w-0"><p className="text-sm font-semibold text-slate-900">{track.title}</p><p className="mt-1 text-xs text-slate-500">{track.materialIds.length > 0 && track.materialIds.every((id) => completedIds.has(id)) ? "Изучен" : "Ожидает изучения"}</p></div>
+                    <Link href={`/?track=${encodeURIComponent(track.id)}`} className="text-sm font-semibold text-[#c95b00] hover:underline">Открыть</Link>
+                  </div>)}
+                </div></div> : null}
+                {assignedMaterials.length ? <div><h3 className="text-sm font-semibold text-slate-900">Материалы</h3><div className="mt-2 divide-y divide-slate-200 border-y border-slate-200">
+                  {assignedMaterials.map((material) => <div key={material.id} className="flex flex-wrap items-center justify-between gap-3 py-4">
+                    <div className="min-w-0"><p className="text-sm font-semibold text-slate-900">{material.title}</p><p className="mt-1 text-xs text-slate-500">{completedIds.has(material.id) ? "Изучен" : "Ожидает изучения"}</p></div>
+                    <Link href={`/?material=${encodeURIComponent(material.id)}`} className="text-sm font-semibold text-[#c95b00] hover:underline">Открыть</Link>
+                  </div>)}
+                </div></div> : null}
+              </div> : <p className="mt-8 text-sm text-slate-500">Пока нет назначенного обучения.</p>
+            ) : null}
             {studyLoaded && learningTab === "tracks" ? (
               completedTracks.length ? <div className="mt-6 divide-y divide-slate-200 border-y border-slate-200">
                 {completedTracks.map((track) => (

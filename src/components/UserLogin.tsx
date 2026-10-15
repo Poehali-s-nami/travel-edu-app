@@ -13,6 +13,7 @@ type LoginStatus =
   | "admin"
   | "archived"
   | "blocked"
+  | "unclaimed"
   | "empty"
   | "not-found"
   | "unknown";
@@ -44,6 +45,10 @@ function getLoginErrorMessage(status: LoginStatus) {
     return "Доступ архивирован. Обратитесь к администратору PSN HUB.";
   }
 
+  if (status === "unclaimed") {
+    return "Аккаунт ещё не подготовлен. Обратитесь к администратору PSN HUB.";
+  }
+
   if (status === "active" || status === "admin") {
     return "Пароль неверный. Проверьте введенные данные.";
   }
@@ -69,7 +74,6 @@ export function UserLogin() {
 
     setIsSubmitting(true);
     setMessage("");
-
     try {
       const email = await loginToFirebaseEmail(login);
       await signInWithEmailAndPassword(auth, email, password);
@@ -130,8 +134,8 @@ export function UserLogin() {
                   role="tooltip"
                   className="pointer-events-none absolute bottom-[calc(100%+0.5rem)] right-0 z-20 w-72 rounded-md bg-[#0b182f] px-3 py-2 text-left text-xs font-normal leading-5 text-white opacity-0 shadow-lg transition-opacity duration-200 group-hover:opacity-100 group-focus:opacity-100"
                 >
-                  Введите логин из CRM и свой личный пароль. При первом входе
-                  используйте первоначальный пароль, который выдал администратор.
+                  Введите логин из CRM и пароль. При первом входе используйте
+                  временный пароль и затем замените его личным.
                 </span>
               </span>
             </label>
@@ -171,7 +175,7 @@ export function UserLogin() {
               disabled={isSubmitting}
               className="mt-2 inline-flex w-full items-center justify-center rounded-full bg-[#F26522] px-6 py-4 text-base font-bold text-white transition-colors duration-200 hover:bg-[#dc5518] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F26522] focus-visible:ring-offset-2 focus-visible:ring-offset-white disabled:cursor-wait disabled:opacity-60"
             >
-              {isSubmitting ? "Входим..." : "Войти"}
+              {isSubmitting ? "Подождите..." : "Войти"}
             </button>
           </form>
 
@@ -180,7 +184,7 @@ export function UserLogin() {
               type="button"
               onClick={() => setShowHelp((current) => !current)}
               aria-expanded={showHelp}
-              className="inline-flex items-center justify-center gap-1.5 text-sm font-semibold text-[#F26522] transition hover:text-[#dc5518] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F26522] focus-visible:ring-offset-4"
+              className="mt-4 inline-flex items-center justify-center gap-1.5 text-sm font-semibold text-[#F26522] transition hover:text-[#dc5518] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#F26522] focus-visible:ring-offset-4"
             >
               Забыли пароль?
               <ChevronDown

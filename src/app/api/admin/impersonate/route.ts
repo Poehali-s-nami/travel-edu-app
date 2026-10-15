@@ -92,6 +92,7 @@ export async function POST(request: NextRequest) {
       active?: { booleanValue?: boolean };
       archived?: { booleanValue?: boolean };
       passwordResetRequested?: { booleanValue?: boolean };
+      claimState?: { stringValue?: string };
       role?: { stringValue?: string };
     } };
     if (record.fields?.active?.booleanValue !== true || record.fields.archived?.booleanValue === true) {
@@ -99,6 +100,10 @@ export async function POST(request: NextRequest) {
     }
     if (record.fields.passwordResetRequested?.booleanValue === true) {
       return failure("Сотрудник должен сначала установить личный пароль.", 409);
+    }
+    if (record.fields.claimState?.stringValue &&
+        record.fields.claimState.stringValue !== "claimed") {
+      return failure("Аккаунт сотрудника ещё не активирован.", 409);
     }
     if (record.fields.role?.stringValue === "admin") {
       return failure("Вход под другим администратором недоступен.", 403);

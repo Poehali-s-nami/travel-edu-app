@@ -1,8 +1,10 @@
 "use client";
 
-import { FormEvent, useState } from "react";
-import { User } from "firebase/auth";
+import { FormEvent, useEffect, useRef, useState } from "react";
+import { signInWithEmailAndPassword, User } from "firebase/auth";
 import { Eye, EyeOff, KeyRound, LogOut } from "lucide-react";
+import Image from "next/image";
+import { auth } from "@/lib/firebase";
 
 const PASSWORD_PATTERN = /^(?=.*\p{L})(?=.*\d).{6,}$/u;
 
@@ -21,6 +23,11 @@ export function PasswordChangeGate({
   const [showPassword, setShowPassword] = useState(false);
   const [message, setMessage] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const dialogHeadingRef = useRef<HTMLHeadingElement>(null);
+
+  useEffect(() => {
+    dialogHeadingRef.current?.focus();
+  }, []);
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -54,7 +61,18 @@ export function PasswordChangeGate({
         throw new Error(result.message ?? "Не удалось сохранить новый пароль.");
       }
 
-      await user.getIdToken(true).catch(() => undefined);
+      setCurrentPassword("");
+      setPassword("");
+      setConfirmation("");
+      if (!auth || !user.email) {
+        onSignOut();
+        return;
+      }
+      try {
+        await signInWithEmailAndPassword(auth, user.email, password);
+      } catch {
+        onSignOut();
+      }
     } catch (error) {
       console.error("Password change failed", error);
       setMessage(
@@ -66,15 +84,31 @@ export function PasswordChangeGate({
   }
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-slate-50 px-4 py-8">
-      <section className="w-full max-w-lg rounded-xl bg-white p-6 shadow-lg ring-1 ring-slate-200 sm:p-8">
+    <main className="min-h-screen bg-slate-50">
+      <header aria-hidden="true" className="border-b border-slate-200 bg-white px-5 py-3">
+        <Image
+          src="/psn-logo.svg"
+          alt=""
+          width={2108}
+          height={871}
+          className="h-12 w-auto object-contain"
+        />
+      </header>
+      <div className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-slate-950/60 px-4 py-5">
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="password-change-title"
+        aria-describedby="password-change-description"
+        className="max-h-[calc(100dvh-2.5rem)] w-full max-w-lg overflow-y-auto rounded-xl bg-white p-6 shadow-2xl ring-1 ring-slate-200 sm:p-8"
+      >
         <div className="flex h-12 w-12 items-center justify-center rounded-full bg-orange-50 text-[#ea6a00]">
           <KeyRound size={24} />
         </div>
-        <h1 className="mt-5 text-2xl font-semibold text-slate-950">
+        <h1 id="password-change-title" ref={dialogHeadingRef} tabIndex={-1} className="mt-5 text-2xl font-semibold text-slate-950 outline-none">
           Создайте личный пароль
         </h1>
-        <p className="mt-2 text-sm leading-6 text-slate-600">
+        <p id="password-change-description" className="mt-2 text-sm leading-6 text-slate-600">
           {displayName ? `${displayName}, первоначальный пароль нужно заменить.` : "Первоначальный пароль нужно заменить."}
           После этого новый пароль будет принадлежать только вам и сохранится при следующих обновлениях базы.
         </p>
@@ -154,6 +188,7 @@ export function PasswordChangeGate({
           Выйти из аккаунта
         </button>
       </section>
+      </div>
     </main>
   );
 }

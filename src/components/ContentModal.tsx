@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { CheckCircle2, ExternalLink, Share2, X } from "lucide-react";
 import { getYouTubeEmbedUrl } from "@/lib/youtube";
 import type { Material } from "@/types/material";
@@ -8,7 +9,7 @@ type ContentModalProps = {
   material: Material | null;
   isCompleted?: boolean;
   onClose: () => void;
-  onComplete?: (material: Material) => void;
+  onComplete?: (material: Material) => void | Promise<void>;
   onOpenTest?: (url: string) => void;
 };
 
@@ -88,8 +89,29 @@ export function ContentModal({
   onComplete,
   onOpenTest
 }: ContentModalProps) {
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+
+  useEffect(() => {
+    setIsSaving(false);
+    setSaveError("");
+  }, [material?.id]);
+
   if (!material) {
     return null;
+  }
+
+  async function handleComplete() {
+    if (!material || !onComplete || isSaving) return;
+    setIsSaving(true);
+    setSaveError("");
+    try {
+      await onComplete(material);
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "Не удалось сохранить прогресс. Повторите попытку.");
+    } finally {
+      setIsSaving(false);
+    }
   }
 
   const previewUrl =
@@ -158,8 +180,8 @@ export function ContentModal({
             <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row">
               <button
                 type="button"
-                onClick={() => onComplete?.(material)}
-                disabled={isCompleted}
+                onClick={() => void handleComplete()}
+                disabled={isCompleted || isSaving}
                 className={`inline-flex min-h-12 items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-medium transition sm:min-h-0 ${
                   isCompleted
                     ? "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-100"
@@ -167,7 +189,7 @@ export function ContentModal({
                 }`}
               >
                 <CheckCircle2 size={16} />
-                {isCompleted ? "Материал изучен" : "Завершить изучение"}
+                {isCompleted ? "Материал изучен" : isSaving ? "Сохраняем..." : "Завершить изучение"}
               </button>
               {material.testUrl ? (
                 <button
@@ -203,6 +225,7 @@ export function ContentModal({
               </a>
             </div>
           </div>
+          {saveError ? <p role="alert" className="text-sm text-red-700">{saveError}</p> : null}
         </div>
       </div>
     </div>

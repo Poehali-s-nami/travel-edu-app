@@ -19,6 +19,7 @@ service cloud.firestore {
           && get(/databases/$(database)/documents/accessUsers/$(request.auth.uid)).data.active == true
           && get(/databases/$(database)/documents/accessUsers/$(request.auth.uid)).data.archived != true
           && get(/databases/$(database)/documents/accessUsers/$(request.auth.uid)).data.get('passwordResetRequested', false) != true
+          && get(/databases/$(database)/documents/accessUsers/$(request.auth.uid)).data.get('claimState', 'claimed') == 'claimed'
         );
     }
 
@@ -40,6 +41,11 @@ service cloud.firestore {
     }
 
     match /tracks/{trackId} {
+      allow read: if isActiveUser();
+      allow write: if isAdmin();
+    }
+
+    match /trainingGroups/{groupId} {
       allow read: if isActiveUser();
       allow write: if isAdmin();
     }

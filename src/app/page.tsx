@@ -139,6 +139,7 @@ export default function Home() {
   const [isAuthLoading, setIsAuthLoading] = useState(true);
   const [isImpersonating, setIsImpersonating] = useState(false);
   const [isAccessLoading, setIsAccessLoading] = useState(true);
+  const [accessLoadError, setAccessLoadError] = useState(false);
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [videoFormatFilter, setVideoFormatFilter] = useState("Все видео");
@@ -188,6 +189,7 @@ export default function Home() {
         setIsAuthLoading(false);
         setIsImpersonating(false);
         setAccessUser(null);
+        setAccessLoadError(false);
         setIsAccessLoading(false);
         window.localStorage.removeItem("travel-edu-session-start");
         setIsAdminOpen(false);
@@ -209,14 +211,16 @@ export default function Home() {
 
   const isAdmin = user?.email === ADMIN_EMAIL;
   const hasAccess =
-    isAdmin || Boolean(accessUser?.active && !accessUser.archived);
+    isAdmin || Boolean(accessUser?.active && !accessUser.archived && accessUser.claimState === "claimed");
+  const canUsePlatform = hasAccess &&
+    (isAdmin || accessUser?.passwordResetRequested !== true);
 
   useEffect(() => {
-    if (!db || !hasAccess) return;
+    if (!db || !canUsePlatform) return;
     return onSnapshot(collection(db, "videoCategories"), (snapshot) => {
       setVideoCategories(uniqueSorted(snapshot.docs.map((item) => String(item.data().name ?? ""))));
     }, () => setVideoCategories([]));
-  }, [hasAccess]);
+  }, [canUsePlatform]);
 
   useEffect(() => {
     if (!user) {
@@ -239,6 +243,7 @@ export default function Home() {
     return onSnapshot(
       doc(db, "accessUsers", user.uid),
       (snapshot) => {
+        setAccessLoadError(false);
         if (!snapshot.exists()) {
           setAccessUser(null);
           setIsAccessLoading(false);
@@ -264,6 +269,7 @@ export default function Home() {
           manual: data.manual === true,
           source: data.source ?? "crm",
           passwordResetRequested: data.passwordResetRequested === true,
+          claimState: data.claimState ?? "claimed",
           passwordPolicyVersion: Number(data.passwordPolicyVersion ?? 0),
           passwordChangedAt: toDate(data.passwordChangedAt),
           createdAt: toDate(data.createdAt) ?? new Date(),
@@ -274,6 +280,7 @@ export default function Home() {
       },
       () => {
         setAccessUser(null);
+        setAccessLoadError(true);
         setIsAccessLoading(false);
       }
     );
@@ -301,7 +308,7 @@ export default function Home() {
   }, [hasAccess, user]);
 
   useEffect(() => {
-    if (!user || !hasAccess || !db) {
+    if (!user || !canUsePlatform || !db) {
       setCompletedMaterialIds(new Set());
       return;
     }
@@ -313,10 +320,12 @@ export default function Home() {
 
     return onSnapshot(
       progressQuery,
+      { includeMetadataChanges: true },
       (snapshot) => {
         setCompletedMaterialIds(
           new Set(
             snapshot.docs
+              .filter((progressDoc) => !progressDoc.metadata.hasPendingWrites)
               .map((progressDoc) => progressDoc.data().materialId)
               .filter(
                 (materialId): materialId is string =>
@@ -330,10 +339,10 @@ export default function Home() {
         setCompletedMaterialIds(new Set());
       }
     );
-  }, [hasAccess, user]);
+  }, [canUsePlatform, user]);
 
   useEffect(() => {
-    if (!user || !hasAccess || !db) {
+    if (!user || !canUsePlatform || !db) {
       return;
     }
 
@@ -350,10 +359,10 @@ export default function Home() {
       createdAt: serverTimestamp(),
       userAgent: window.navigator.userAgent.slice(0, 300)
     }).catch(() => window.sessionStorage.removeItem(eventKey));
-  }, [accessUser?.login, hasAccess, user]);
+  }, [accessUser?.login, canUsePlatform, user]);
 
   useEffect(() => {
-    if (!db || !hasAccess) {
+    if (!db || !canUsePlatform) {
       return;
     }
 
@@ -404,10 +413,10 @@ export default function Home() {
         setMaterials(demoMaterials);
       }
     );
-  }, [hasAccess]);
+  }, [canUsePlatform]);
 
   useEffect(() => {
-    if (!db || !hasAccess) {
+    if (!db || !canUsePlatform) {
       return;
     }
 
@@ -447,7 +456,7 @@ export default function Home() {
         setTracks(demoTracks);
       }
     );
-  }, [hasAccess]);
+  }, [canUsePlatform]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -569,14 +578,12 @@ export default function Home() {
   }
 
   async function completeMaterial(material: Material) {
-    if (!user || !hasAccess) {
-      return;
+    if (!user || !canUsePlatform) {
+      throw new Error("Сначала войдите в свой аккаунт.");
     }
 
-    setCompletedMaterialIds((current) => new Set(current).add(material.id));
-
     if (!db) {
-      return;
+      throw new Error("База данных временно недоступна. Попробуйте позже.");
     }
 
     try {
@@ -590,8 +597,10 @@ export default function Home() {
         },
         { merge: true }
       );
+      setCompletedMaterialIds((current) => new Set(current).add(material.id));
     } catch (error) {
       console.warn("Learning progress could not be saved:", error);
+      throw new Error("Не удалось сохранить прогресс. Проверьте соединение и повторите попытку.");
     }
   }
 
@@ -770,11 +779,12 @@ export default function Home() {
         <section className="w-full max-w-md rounded-xl bg-white p-7 text-center shadow-md ring-1 ring-slate-200/70">
           <ShieldCheck className="mx-auto text-slate-300" size={34} />
           <h1 className="mt-4 text-xl font-semibold text-slate-950">
-            Доступ приостановлен
+             {accessLoadError ? "Не удалось проверить доступ" : "Доступ приостановлен"}
           </h1>
           <p className="mt-2 text-sm leading-6 text-slate-500">
-            Учетная запись не активна или еще не добавлена в PSN HUB.
-            Обратитесь к администратору.
+             {accessLoadError
+               ? "Сервис данных временно недоступен. Ваш пароль мог быть принят, но профиль сейчас не загрузился. Повторите попытку позже."
+               : "Учетная запись не активна или еще не добавлена в PSN HUB. Обратитесь к администратору."}
           </p>
           <div className="mt-5 rounded-lg bg-slate-50 p-4 text-left text-sm leading-6 text-slate-600 ring-1 ring-slate-200">
             <p className="font-semibold text-slate-900">Что делать дальше</p>

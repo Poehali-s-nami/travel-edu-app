@@ -127,6 +127,7 @@ async function getAccessUser(token: string, uid: string) {
 }
 
 export async function POST(request: NextRequest) {
+  let passwordUpdated = false;
   try {
     const authorization = request.headers.get("authorization") ?? "";
     const idToken = authorization.startsWith("Bearer ")
@@ -184,46 +185,52 @@ export async function POST(request: NextRequest) {
       }
     );
     if (!passwordResponse.ok) throw new Error("Firebase password update failed");
+    passwordUpdated = true;
 
     const now = new Date().toISOString();
-    const firestoreResponse = await fetch(
-      `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents:commit`,
-      {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${token}`,
-          "content-type": "application/json"
+    const commitBody = JSON.stringify({
+      writes: [{
+        update: {
+          name: `projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents/accessUsers/${uid}`,
+          fields: {
+            passwordResetRequested: { booleanValue: false },
+            passwordPolicyVersion: { integerValue: "1" },
+            passwordChangedAt: { timestampValue: now },
+            updatedAt: { timestampValue: now }
+          }
         },
-        body: JSON.stringify({
-          writes: [
-            {
-              update: {
-                name: `projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents/accessUsers/${uid}`,
-                fields: {
-                  passwordResetRequested: { booleanValue: false },
-                  passwordPolicyVersion: { integerValue: "1" },
-                  passwordChangedAt: { timestampValue: now },
-                  updatedAt: { timestampValue: now }
-                }
-              },
-              updateMask: {
-                fieldPaths: [
-                  "passwordResetRequested",
-                  "passwordPolicyVersion",
-                  "passwordChangedAt",
-                  "updatedAt"
-                ]
-              }
-            }
-          ]
-        })
+        updateMask: {
+          fieldPaths: ["passwordResetRequested", "passwordPolicyVersion", "passwordChangedAt", "updatedAt"]
+        }
+      }]
+    });
+    let statusSaved = false;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const result = await fetch(
+          `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents:commit`,
+          {
+            method: "POST",
+            headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+            body: commitBody
+          }
+        );
+        if (result.ok) {
+          statusSaved = true;
+          break;
+        }
+      } catch (error) {
+        console.error("Password status update attempt failed", error);
       }
-    );
-    if (!firestoreResponse.ok) throw new Error("Password status update failed");
+      if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 300 * (attempt + 1)));
+    }
+    if (!statusSaved) throw new Error("Password status update failed");
 
     return json({ changed: true });
   } catch (error) {
     console.error("Password change failed", error);
-    return json({ message: "Не удалось изменить пароль." }, 500);
+    return json({ message: passwordUpdated
+      ? "Пароль изменён, но завершить активацию не удалось. Обратитесь к администратору; повторно используйте уже новый пароль."
+      : "Не удалось изменить пароль." }, 500);
   }
 }

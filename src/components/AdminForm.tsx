@@ -59,6 +59,7 @@ import { categoryKey, formatDate, normalizeCategory, uniqueSorted, videoFormat, 
 import { TrackInfoEditor } from "@/components/TrackInfoEditor";
 import { TrackPreview } from "@/components/TrackPreview";
 import { TrackMaterialPicker } from "@/components/TrackMaterialPicker";
+import { TrainingGroupsWorkspace } from "@/components/TrainingGroupsWorkspace";
 import { UnsavedEditorProvider, useEditorDraft, useEditorNavigation } from "@/components/UnsavedEditor";
 import type {
   ContentTab,
@@ -68,10 +69,19 @@ import type {
   TrackInfoBlock,
   TrendingStamp
 } from "@/types/material";
-import type { AccessUser } from "@/types/access-user";
+import type { AccessUser, TrainingRole } from "@/types/access-user";
+import type { TrainingGroup } from "@/types/training-group";
 
 const CRM_IMPORT_BATCH_SIZE = 12;
 const PERSONAL_PASSWORD_PATTERN = /^(?=.*\p{L})(?=.*\d).{6,}$/u;
+const TRAINING_ROLE_LABELS: Record<TrainingRole, string> = {
+  HEAD: "Руководитель",
+  MANAGER: "Менеджер",
+  EMPLOYEE: "Сотрудник",
+  PARTNER: "Партнёр",
+  MANUAL_REVIEW: "Нужна проверка",
+  ADMIN: "Администратор"
+};
 
 type AdminFormProps = {
   user: User | null;
@@ -91,8 +101,15 @@ type ArchiveFilter = "active" | "archived" | "all";
 type ParsedImportUser = {
   crmId: string;
   login: string;
+  loginSource?: "name_fallback";
   displayName: string;
   office: string;
+  officeIds: string[];
+  offices: string[];
+  officeLinks: Array<{ id: string; name: string; city: string }>;
+  city: string;
+  position: string;
+  crmUserTypes: string[];
   email: string;
   phone: string;
   active: boolean;
@@ -102,11 +119,24 @@ type ParsedImportUser = {
 type ImportPreview = {
   fileName: string;
   totalRows: number;
+  isActiveUsersReport: boolean;
   validUsers: ParsedImportUser[];
   skippedMissing: number;
   skippedBlocked: number;
   duplicateIds: number;
   duplicateLogins: number;
+  conflictingIds: number;
+  officeLinks: number;
+  blockedCrmIdsWithoutLogin: string[];
+  usersForManualBinding: Array<{ crmId: string; displayName: string; crmUserTypes: string[]; isBlocked: boolean; conflictingAccess: boolean }>;
+  nameFallbackCount: number;
+};
+
+type ImportConflict = {
+  crmId: string;
+  displayName: string;
+  login: string;
+  reason: string;
 };
 
 type ImportHistoryItem = {
@@ -160,6 +190,8 @@ const initialManualUserForm = {
   office: "",
   email: "",
   phone: "",
+  trainingRole: "" as "" | "HEAD" | "MANAGER" | "EMPLOYEE" | "PARTNER",
+  groupIds: [] as string[],
   accessCode: ""
 };
 
@@ -211,6 +243,7 @@ function isTruthyImportValue(value: string) {
 function buildImportPreview(fileName: string, rows: unknown[][]): ImportPreview {
   const headerRowIndex = findImportHeaderRow(rows);
   const headers = (rows[headerRowIndex] ?? []).map(normalizeImportHeader);
+  const hasStableIds = headers.includes(normalizeImportHeader("ID пользователя"));
   const records = rows.slice(headerRowIndex + 1).map((values) =>
     Object.fromEntries(
       headers.map((header, index) => [
@@ -219,7 +252,8 @@ function buildImportPreview(fileName: string, rows: unknown[][]): ImportPreview 
       ])
     )
   );
-  const users = records.map((record) => {
+  const nonEmptyRecords = records.filter((record) => Object.values(record).some(Boolean));
+  const users: ParsedImportUser[] = nonEmptyRecords.map((record) => {
     const crmId = getImportValue(record, [
       "id",
       "crm id",
@@ -247,58 +281,143 @@ function buildImportPreview(fileName: string, rows: unknown[][]): ImportPreview 
       getImportValue(record, ["display name", "name", "фио", "пользователь", "сотрудник"]) ||
       [firstName, lastName].filter(Boolean).join(" ");
     const email = getImportValue(record, ["email", "e-mail", "почта"]);
-    const login = rawLogin || email || displayName;
+    const login = hasStableIds ? rawLogin : rawLogin || email || displayName;
     const blocked = getImportValue(record, ["blocked", "заблокирован"]);
-    const isBlocked = blocked ? isTruthyImportValue(blocked) : false;
+    const crmAccess = getImportValue(record, ["Доступ в CRM"]);
+    const isBlocked = (blocked ? isTruthyImportValue(blocked) : false) || crmAccess === "0";
+    const office = getImportValue(record, ["название офиса", "офис", "office"]);
+    const officeId = getImportValue(record, ["ID офиса"]);
+    const city = getImportValue(record, ["Город офиса"]);
+    const crmUserType = getImportValue(record, ["Тип пользователя"]);
 
     return {
       crmId,
       login,
       displayName: displayName || login,
-      office: getImportValue(record, ["название офиса", "офис", "office"]),
+      office,
+      officeIds: officeId ? [officeId] : [],
+      offices: office ? [office] : [],
+      officeLinks: officeId || office ? [{ id: officeId, name: office, city }] : [],
+      city,
+      position: getImportValue(record, ["Должность"]),
+      crmUserTypes: crmUserType ? [crmUserType] : [],
       email,
       phone: getImportValue(record, ["phone", "телефон"]),
       active: !isBlocked,
       isBlocked
     };
   });
-  const validSourceUsers = users.filter((importUser) => importUser.login);
-  const seenIds = new Set<string>();
-  const seenLogins = new Set<string>();
-  const validUsers: ParsedImportUser[] = [];
+  const idCounts = new Map<string, number>();
+  const nameCounts = new Map<string, number>();
+  const explicitLogins = new Set(users.map((user) => normalizeLogin(user.login)).filter(Boolean));
+  const fallbackNames = nonEmptyRecords.map((record) => {
+    const first = getImportValue(record, ["first name", "имя", "имя рус", "имя (рус.)"]);
+    const last = getImportValue(record, ["last name", "фамилия", "фамилия рус", "фамилия (рус)"]);
+    return first && last ? `${first} ${last}` : "";
+  });
+  users.forEach((user, index) => {
+    if (user.crmId) idCounts.set(user.crmId, (idCounts.get(user.crmId) ?? 0) + 1);
+    const name = normalizeLogin(fallbackNames[index]);
+    if (name) nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
+  });
+  let nameFallbackCount = 0;
+  if (hasStableIds) {
+    users.forEach((user, index) => {
+      const name = fallbackNames[index];
+      const normalizedName = normalizeLogin(name);
+      if (!user.login && user.crmId && name &&
+          idCounts.get(user.crmId) === 1 &&
+          nameCounts.get(normalizedName) === 1 &&
+          !explicitLogins.has(normalizedName)) {
+        user.login = name;
+        user.loginSource = "name_fallback";
+        nameFallbackCount += 1;
+      }
+    });
+  }
+  const validSourceUsers = users.filter((importUser) => importUser.login && (!hasStableIds || importUser.crmId));
+  const grouped = new Map<string, ParsedImportUser>();
+  const conflictingKeys = new Set<string>();
+  const loginOwners = new Map<string, string>();
   let duplicateIds = 0;
   let duplicateLogins = 0;
 
   for (const importUser of validSourceUsers) {
-    const normalizedId = importUser.crmId.trim();
+    const normalizedId = importUser.crmId.trim() || `login:${normalizeLogin(importUser.login)}`;
     const normalizedLogin = normalizeLogin(importUser.login);
-
-    if (normalizedId && seenIds.has(normalizedId)) {
-      duplicateIds += 1;
-      continue;
-    }
-
-    if (seenLogins.has(normalizedLogin)) {
+    const owner = loginOwners.get(normalizedLogin);
+    if (owner && owner !== normalizedId) {
+      conflictingKeys.add(owner);
+      conflictingKeys.add(normalizedId);
       duplicateLogins += 1;
+    } else {
+      loginOwners.set(normalizedLogin, normalizedId);
+    }
+    const existing = grouped.get(normalizedId);
+    if (existing) {
+      duplicateIds += 1;
+      if (normalizeLogin(existing.login) !== normalizedLogin ||
+          normalizeLogin(existing.displayName) !== normalizeLogin(importUser.displayName) ||
+          existing.isBlocked !== importUser.isBlocked) {
+        conflictingKeys.add(normalizedId);
+        continue;
+      }
+      for (const officeId of importUser.officeIds) {
+        if (!existing.officeIds.includes(officeId)) existing.officeIds.push(officeId);
+      }
+      for (const office of importUser.offices) {
+        if (!existing.offices.includes(office)) existing.offices.push(office);
+      }
+      for (const link of importUser.officeLinks) {
+        if (!existing.officeLinks.some((item) => link.id ? item.id === link.id : item.name === link.name)) {
+          existing.officeLinks.push(link);
+        }
+      }
+      for (const userType of importUser.crmUserTypes) {
+        if (!existing.crmUserTypes.includes(userType)) existing.crmUserTypes.push(userType);
+      }
       continue;
     }
-
-    if (normalizedId) {
-      seenIds.add(normalizedId);
-    }
-    seenLogins.add(normalizedLogin);
-    validUsers.push(importUser);
+    grouped.set(normalizedId, importUser);
   }
+  const validUsers = [...grouped].filter(([key]) => !conflictingKeys.has(key)).map(([, user]) => user);
+  const importedIds = new Set(validUsers.map((user) => user.crmId));
+  const manualGroups = new Map<string, { crmId: string; displayName: string; crmUserTypes: string[]; accessStates: Set<boolean> }>();
+  for (const user of users) {
+    if (!hasStableIds || !user.crmId || user.login || importedIds.has(user.crmId)) continue;
+    const group = manualGroups.get(user.crmId) ?? {
+      crmId: user.crmId, displayName: user.displayName, crmUserTypes: [], accessStates: new Set<boolean>()
+    };
+    group.accessStates.add(user.isBlocked);
+    for (const value of user.crmUserTypes) {
+      if (!group.crmUserTypes.includes(value)) group.crmUserTypes.push(value);
+    }
+    manualGroups.set(user.crmId, group);
+  }
+  const usersForManualBinding = [...manualGroups.values()].map((group) => ({
+    crmId: group.crmId,
+    displayName: group.displayName,
+    crmUserTypes: group.crmUserTypes,
+    isBlocked: group.accessStates.size === 1 && group.accessStates.has(true),
+    conflictingAccess: group.accessStates.size > 1
+  }));
+  const blockedCrmIdsWithoutLogin = usersForManualBinding.filter((user) => user.isBlocked).map((user) => user.crmId);
 
   return {
     fileName,
     totalRows: users.length,
+    isActiveUsersReport: hasStableIds,
     validUsers,
-    skippedMissing: users.filter((importUser) => !importUser.login)
+    skippedMissing: users.filter((importUser) => !importUser.login || (hasStableIds && !importUser.crmId))
       .length,
-    skippedBlocked: users.filter((importUser) => importUser.isBlocked).length,
+    skippedBlocked: validUsers.filter((importUser) => importUser.isBlocked).length,
     duplicateIds,
-    duplicateLogins
+    duplicateLogins,
+    conflictingIds: conflictingKeys.size,
+    officeLinks: validUsers.reduce((count, user) => count + user.officeLinks.length, 0),
+    blockedCrmIdsWithoutLogin,
+    usersForManualBinding,
+    nameFallbackCount
   };
 }
 
@@ -321,7 +440,7 @@ function AdminWorkspace({
   const [loginPassword, setLoginPassword] = useState("");
   const [message, setMessage] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [section, setSection] = useState<"add" | "archive" | "users">("add");
+  const [section, setSection] = useState<"add" | "archive" | "users" | "groups">("add");
   const [addMode, setAddMode] = useState<AddMode>("menu");
   const [archiveMode, setArchiveMode] = useState<ArchiveMode>("webinars");
   const [archiveFilter, setArchiveFilter] = useState<ArchiveFilter>("active");
@@ -330,10 +449,12 @@ function AdminWorkspace({
   const [trackForm, setTrackForm] = useState(initialTrackForm);
   const [trackMaterialIds, setTrackMaterialIds] = useState<string[]>([]);
   const [accessUsers, setAccessUsers] = useState<AccessUser[]>([]);
+  const [trainingGroups, setTrainingGroups] = useState<TrainingGroup[]>([]);
   const [manualUserForm, setManualUserForm] = useState(initialManualUserForm);
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
-  const [importAccessCode, setImportAccessCode] = useState("");
+  const [importConflicts, setImportConflicts] = useState<ImportConflict[]>([]);
   const [importArchiveMissing, setImportArchiveMissing] = useState(false);
+  const [importTemporaryPassword, setImportTemporaryPassword] = useState("");
   const [lastImport, setLastImport] = useState<ImportHistoryItem | null>(null);
 
   const isAdmin = user?.email === ADMIN_EMAIL;
@@ -362,14 +483,21 @@ function AdminWorkspace({
                 normalizedLogin: data.normalizedLogin ?? "",
                 displayName: data.displayName ?? data.login ?? "Пользователь",
                 office: data.office ?? "",
+                officeIds: Array.isArray(data.officeIds) ? data.officeIds : [],
+                officeLinks: Array.isArray(data.officeLinks) ? data.officeLinks : [],
+                groupIds: Array.isArray(data.groupIds) ? data.groupIds : [],
                 email: data.email ?? "",
                 phone: data.phone ?? "",
                 role: data.role ?? "user",
+                trainingRole: data.trainingRole,
+                trainingRoleManual: data.trainingRoleManual === true,
+                crmUserTypes: Array.isArray(data.crmUserTypes) ? data.crmUserTypes : [],
                 active: data.active === true,
                 archived: data.archived === true,
                 manual: data.manual === true,
                 source: data.source ?? "crm",
                 passwordResetRequested: data.passwordResetRequested === true,
+                claimState: data.claimState ?? "claimed",
                 passwordPolicyVersion: Number(data.passwordPolicyVersion ?? 0),
                 passwordChangedAt: toDate(data.passwordChangedAt),
                 createdAt: toDate(data.createdAt) ?? new Date(),
@@ -389,6 +517,27 @@ function AdminWorkspace({
         );
       }
     );
+  }, [isAdmin, isOpen]);
+
+  useEffect(() => {
+    if (!isOpen || !isAdmin || !db) {
+      setTrainingGroups([]);
+      return;
+    }
+    return onSnapshot(collection(db, "trainingGroups"), (snapshot) => {
+      setTrainingGroups(snapshot.docs.map((item) => {
+        const data = item.data();
+        return {
+          id: item.id,
+          name: String(data.name ?? "Группа"),
+          kind: data.kind === "office" ? "office" : "manual",
+          officeId: typeof data.officeId === "string" ? data.officeId : undefined,
+          trackIds: Array.isArray(data.trackIds) ? data.trackIds : [],
+          materialIds: Array.isArray(data.materialIds) ? data.materialIds : [],
+          archived: data.archived === true
+        };
+      }));
+    }, (error) => setMessage(`Не удалось загрузить группы: ${error.message}`));
   }, [isAdmin, isOpen]);
 
   useEffect(() => {
@@ -765,10 +914,14 @@ function AdminWorkspace({
     const displayName = manualUserForm.displayName.trim() || login;
     const accessCode = manualUserForm.accessCode.trim();
 
-    if (!crmId || !login || !PERSONAL_PASSWORD_PATTERN.test(accessCode)) {
+    if (!crmId || !login || !manualUserForm.trainingRole || !PERSONAL_PASSWORD_PATTERN.test(accessCode)) {
       setMessage(
-        "Заполните CRM ID, логин/ФИО и первоначальный пароль: минимум 6 символов, буква и цифра."
+        "Заполните CRM ID, логин/ФИО, учебную роль и первоначальный пароль: минимум 6 символов, буква и цифра."
       );
+      return;
+    }
+    if (manualUserForm.groupIds.some((id) => !trainingGroups.some((group) => group.id === id && !group.archived))) {
+      setMessage("Одна из выбранных групп больше не доступна. Обновите выбор.");
       return;
     }
 
@@ -796,9 +949,12 @@ function AdminWorkspace({
           normalizedLogin: normalizeLogin(login),
           displayName,
           office: manualUserForm.office.trim(),
+          groupIds: manualUserForm.groupIds,
           email: manualUserForm.email.trim(),
           phone: manualUserForm.phone.trim(),
           role: "user",
+          trainingRole: manualUserForm.trainingRole,
+          trainingRoleManual: true,
           active: true,
           archived: false,
           manual: true,
@@ -834,6 +990,7 @@ function AdminWorkspace({
 
     setMessage("");
     setImportPreview(null);
+    setImportConflicts([]);
 
     try {
       const xlsx = await import("xlsx");
@@ -851,7 +1008,8 @@ function AdminWorkspace({
 
       const preview = buildImportPreview(file.name, rows);
       setImportPreview(preview);
-      setImportArchiveMissing(true);
+      setImportArchiveMissing(false);
+      setImportTemporaryPassword("");
     } catch (error) {
       console.error("Failed to parse CRM import file:", error);
       setMessage("Не удалось прочитать Excel-файл. Проверьте, что это .xlsx выгрузка CRM.");
@@ -866,21 +1024,22 @@ function AdminWorkspace({
       return;
     }
 
-    if (importAccessCode.trim().length < 12) {
-      setMessage("Пароль для импорта должен быть не короче 12 символов.");
+    if (!PERSONAL_PASSWORD_PATTERN.test(importTemporaryPassword) ||
+        importTemporaryPassword.length > 128) {
+      setMessage("Задайте общий временный пароль: минимум 6 символов, буква и цифра.");
       return;
     }
 
     if (
       !window.confirm(
-        `Подтвердите обработку ${importPreview.validUsers.length} записей. Первоначальный пароль будет установлен только новым пользователям и старым аккаунтам, которые еще не перешли на личный пароль. Личные пароли и прогресс остальных пользователей сохранятся.`
+        `Подтвердите обработку ${importPreview.validUsers.length} записей. Новые пользователи войдут с общим временным паролем и обязаны будут заменить его личным. Пароли и прогресс существующих пользователей сохранятся.`
       )
     ) {
       return;
     }
 
     if (
-      importArchiveMissing &&
+      importArchiveMissing && !importPreview.isActiveUsersReport &&
       !window.confirm(
         "Вы включили архивацию пользователей, которых нет в файле. Продолжайте только если это полная CRM-выгрузка, а не тестовая выборка."
       )
@@ -890,6 +1049,7 @@ function AdminWorkspace({
 
     setIsSubmitting(true);
     setMessage("");
+    setImportConflicts([]);
 
     try {
       const idToken = await user.getIdToken();
@@ -910,10 +1070,12 @@ function AdminWorkspace({
         updated: 0,
         skipped:
           importPreview.skippedMissing +
-          importPreview.duplicateIds +
-          importPreview.duplicateLogins,
-        imported: 0
+          importPreview.duplicateLogins +
+          importPreview.conflictingIds,
+        imported: 0,
+        archivedWithoutLogin: 0
       };
+      const conflicts: ImportConflict[] = [];
 
       for (const [batchIndex, batch] of batches.entries()) {
         setMessage(
@@ -925,16 +1087,19 @@ function AdminWorkspace({
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             idToken,
-            accessCode: importAccessCode.trim(),
-            archiveMissing: importArchiveMissing && batchIndex === batches.length - 1,
+            temporaryPassword: importTemporaryPassword,
+            blockedCrmIdsWithoutLogin: batchIndex === batches.length - 1
+              ? importPreview.blockedCrmIdsWithoutLogin
+              : undefined,
+            archiveMissing: !importPreview.isActiveUsersReport && importArchiveMissing && batchIndex === batches.length - 1,
             allCrmIds:
-              importArchiveMissing && batchIndex === batches.length - 1
+              !importPreview.isActiveUsersReport && importArchiveMissing && batchIndex === batches.length - 1
                 ? importPreview.validUsers
                     .map((importUser) => importUser.crmId)
                     .filter(Boolean)
                 : undefined,
             allUserKeys:
-              importArchiveMissing && batchIndex === batches.length - 1
+              !importPreview.isActiveUsersReport && importArchiveMissing && batchIndex === batches.length - 1
                 ? Array.from(
                     new Set(
                       importPreview.validUsers.flatMap((importUser) => [
@@ -942,9 +1107,6 @@ function AdminWorkspace({
                           ? `crm:${importUser.crmId.trim()}`
                           : "",
                         `login:${normalizeLogin(importUser.login)}`,
-                        importUser.email.trim()
-                          ? `email:${importUser.email.trim().toLowerCase()}`
-                          : ""
                       ]).filter(Boolean)
                     )
                   )
@@ -958,23 +1120,33 @@ function AdminWorkspace({
           updated?: number;
           skipped?: number;
           imported?: number;
+          archivedWithoutLogin?: number;
+          conflicts?: ImportConflict[];
         };
 
         if (!response.ok) {
-          throw new Error(batchResult.message ?? "Импорт не выполнен.");
+          setImportConflicts(conflicts);
+          setMessage(
+            `Импорт остановлен на партии ${batchIndex + 1} из ${batches.length}: ${batchResult.message ?? "Не удалось выполнить импорт."} Уже обработано: ${result.imported} пользователей.`
+          );
+          return;
         }
 
         result.created += batchResult.created ?? 0;
         result.updated += batchResult.updated ?? 0;
         result.skipped += batchResult.skipped ?? 0;
         result.imported += batchResult.imported ?? 0;
+        result.archivedWithoutLogin += batchResult.archivedWithoutLogin ?? 0;
+        conflicts.push(...(batchResult.conflicts ?? []));
       }
 
+      setImportConflicts(conflicts);
       setMessage(
         `Импорт завершен. Импортировано: ${result.imported ?? 0}, создано: ${
           result.created ?? 0
-        }, обновлено: ${result.updated ?? 0}, пропущено: ${result.skipped ?? 0}.`
+        }, обновлено: ${result.updated ?? 0}, архивировано по ID без логина: ${result.archivedWithoutLogin}, пропущено: ${result.skipped ?? 0}. Конфликтных аккаунтов для ручной проверки: ${conflicts.length}.`
       );
+      setImportTemporaryPassword("");
       try {
         if (db) {
           await addDoc(collection(db, "importHistory"), {
@@ -984,7 +1156,7 @@ function AdminWorkspace({
             created: result.created ?? 0,
             updated: result.updated ?? 0,
             skipped: result.skipped ?? 0,
-            archiveMissing: importArchiveMissing,
+            archiveMissing: !importPreview.isActiveUsersReport && importArchiveMissing,
             createdAt: serverTimestamp()
           });
         }
@@ -992,7 +1164,7 @@ function AdminWorkspace({
         console.warn("CRM import history was not saved:", historyError);
       }
     } catch (error) {
-      console.error("Web CRM import failed:", error);
+      console.warn("Web CRM import failed:", error);
       setMessage(
         error instanceof Error
           ? error.message
@@ -1104,6 +1276,15 @@ function AdminWorkspace({
                     setSelectedEntityId(null);
                   })}
                 />
+                <PillButton
+                  active={section === "groups"}
+                  icon={<Users size={16} />}
+                  label="Группы"
+                  onClick={() => navigate(() => {
+                    setSection("groups");
+                    setSelectedEntityId(null);
+                  })}
+                />
               </div>
 
               {section === "add" ? (
@@ -1176,20 +1357,29 @@ function AdminWorkspace({
                   onUpdateTrack={updateTrack}
                   onDelete={deleteEntity}
                 />
+              ) : section === "groups" ? (
+                <TrainingGroupsWorkspace
+                  groups={trainingGroups}
+                  users={accessUsers}
+                  materials={materials}
+                  tracks={tracks}
+                />
               ) : (
                 <UsersWorkspace
                   users={accessUsers}
                   onUpdate={updateAccessUser}
                   manualUserForm={manualUserForm}
+                  trainingGroups={trainingGroups}
                   importPreview={importPreview}
-                  importAccessCode={importAccessCode}
+                  importConflicts={importConflicts}
                   importArchiveMissing={importArchiveMissing}
+                  importTemporaryPassword={importTemporaryPassword}
                   lastImport={lastImport}
                   isSubmitting={isSubmitting}
                   onManualUserChange={setManualUserForm}
                   onManualUserSubmit={handleManualUserSubmit}
-                  onImportAccessCodeChange={setImportAccessCode}
                   onImportArchiveMissingChange={setImportArchiveMissing}
+                  onImportTemporaryPasswordChange={setImportTemporaryPassword}
                   onImportFile={handleImportFile}
                   onWebImportSubmit={handleWebImportSubmit}
                 />
@@ -1563,11 +1753,13 @@ function TrackCreateForm({
 
 function ManualUserCreateForm({
   form,
+  groups,
   isSubmitting,
   onFormChange,
   onSubmit
 }: {
   form: typeof initialManualUserForm;
+  groups: TrainingGroup[];
   isSubmitting: boolean;
   onFormChange: (form: typeof initialManualUserForm) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
@@ -1613,6 +1805,28 @@ function ManualUserCreateForm({
           value={form.office}
           onChange={(value) => onFormChange({ ...form, office: value })}
         />
+        <label className="text-sm font-medium text-slate-700">Учебная роль
+          <select value={form.trainingRole} onChange={(event) => onFormChange({ ...form, trainingRole: event.target.value as typeof form.trainingRole })}
+            className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm" required>
+            <option value="">Выберите роль</option>
+            <option value="HEAD">Руководитель</option>
+            <option value="MANAGER">Менеджер</option>
+            <option value="EMPLOYEE">Сотрудник</option>
+            <option value="PARTNER">Партнёр</option>
+          </select>
+        </label>
+        <fieldset className="min-w-0 text-sm font-medium text-slate-700">
+          <legend>Группы</legend>
+          <div className="mt-2 max-h-40 overflow-y-auto rounded-lg border border-slate-200 p-2">
+            {groups.filter((group) => !group.archived).map((group) => <label key={group.id} className="flex items-start gap-2 rounded-md px-2 py-1.5 font-normal hover:bg-slate-50">
+              <input type="checkbox" checked={form.groupIds.includes(group.id)} className="mt-0.5 accent-[#ea6a00]"
+                onChange={(event) => onFormChange({ ...form, groupIds: event.target.checked
+                  ? [...form.groupIds, group.id] : form.groupIds.filter((id) => id !== group.id) })} />
+              <span className="min-w-0 break-words">{group.name} <span className="text-xs text-slate-500">{group.kind === "office" ? "· офис CRM" : ""}</span></span>
+            </label>)}
+            {!groups.some((group) => !group.archived) ? <p className="px-2 py-1.5 text-xs font-normal text-slate-500">Группы пока не созданы.</p> : null}
+          </div>
+        </fieldset>
         <TextField
           label="Почта"
           type="email"
@@ -1650,33 +1864,27 @@ function ManualUserCreateForm({
 
 function CrmImportPanel({
   preview,
-  accessCode,
+  conflicts,
   archiveMissing,
+  temporaryPassword,
   lastImport,
   isSubmitting,
-  onAccessCodeChange,
   onArchiveMissingChange,
+  onTemporaryPasswordChange,
   onFile,
   onSubmit
 }: {
   preview: ImportPreview | null;
-  accessCode: string;
+  conflicts: ImportConflict[];
   archiveMissing: boolean;
+  temporaryPassword: string;
   lastImport: ImportHistoryItem | null;
   isSubmitting: boolean;
-  onAccessCodeChange: (value: string) => void;
   onArchiveMissingChange: (value: boolean) => void;
+  onTemporaryPasswordChange: (value: string) => void;
   onFile: (file: File | null) => Promise<void>;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
-  const [copiedAccessCode, setCopiedAccessCode] = useState(false);
-
-  async function copyAccessCode() {
-    if (!accessCode) return;
-    await window.navigator.clipboard.writeText(accessCode);
-    setCopiedAccessCode(true);
-  }
-
   return (
     <form
       onSubmit={onSubmit}
@@ -1726,6 +1934,24 @@ function CrmImportPanel({
         </div>
       ) : null}
 
+      {conflicts.length ? (
+        <details open className="mt-5 rounded-lg border border-amber-200 bg-amber-50 p-4">
+          <summary className="cursor-pointer text-sm font-semibold text-slate-900">
+            Требуют ручной проверки: {conflicts.length}
+          </summary>
+          <p className="mt-2 text-xs text-slate-600">
+            Эти записи не изменены. Сверьте CRM ID и логин с существующими аккаунтами перед повторным импортом.
+          </p>
+          <div className="mt-3 max-h-64 overflow-auto text-sm">
+            {conflicts.map((item, index) => (
+              <p key={`${item.crmId}:${index}`} className="border-t border-amber-200 py-2">
+                <span className="font-mono">{item.crmId || "Без CRM ID"}</span> · {item.displayName || "Без ФИО"} · {item.login} · {item.reason}
+              </p>
+            ))}
+          </div>
+        </details>
+      ) : null}
+
       {preview ? (
         <div className="mt-5 space-y-5">
           <div className="rounded-lg bg-slate-50 p-4 ring-1 ring-slate-200">
@@ -1735,49 +1961,58 @@ function CrmImportPanel({
             <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
               <ImportStat label="Всего строк" value={preview.totalRows} />
               <ImportStat label="К обработке" value={preview.validUsers.length} />
-              <ImportStat label="Без логина/e-mail" value={preview.skippedMissing} />
-              <ImportStat label="Будут архивированы" value={preview.skippedBlocked} />
+              <ImportStat label="Без ID или логина" value={preview.skippedMissing} />
+              <ImportStat label="Без доступа CRM / заблокированы" value={preview.skippedBlocked + preview.blockedCrmIdsWithoutLogin.length} />
               <ImportStat
-                label="Повторы"
-                value={preview.duplicateIds + preview.duplicateLogins}
+                label="Строки других офисов"
+                value={preview.duplicateIds}
               />
             </div>
+            <p className="mt-3 text-xs text-slate-600">
+              Офисных привязок: {preview.officeLinks}. Автологин по имени и фамилии: {preview.nameFallbackCount}. Конфликтных записей: {preview.conflictingIds}.
+              {preview.isActiveUsersReport ? " Отсутствующих в этой выборке пользователей не архивируем." : ""}
+            </p>
           </div>
 
-          <div className="grid gap-4 lg:grid-cols-[1fr_auto_auto] lg:items-end">
-            <TextField
-              label="Первоначальный пароль для новых пользователей"
+          {preview.usersForManualBinding.length ? (
+            <details className="rounded-lg border border-amber-200 bg-amber-50 p-4">
+              <summary className="cursor-pointer text-sm font-semibold text-slate-900">
+                Без логина: {preview.usersForManualBinding.length} пользователей для ручной привязки
+              </summary>
+              <p className="mt-2 text-xs text-slate-600">
+                Аккаунты для них не создаются. Сверьте CRM ID и назначьте логины вручную до следующего импорта.
+              </p>
+              <div className="mt-3 max-h-64 overflow-auto text-sm">
+                {preview.usersForManualBinding.map((item) => (
+                  <p key={item.crmId} className="border-t border-amber-200 py-2">
+                    <span className="font-mono">{item.crmId}</span> · {item.displayName || "Без ФИО"} · {item.crmUserTypes.join("; ") || "Тип не указан"}
+                    {item.isBlocked ? " · доступ в CRM отключён" : ""}
+                    {item.conflictingAccess ? " · конфликт доступа между строками" : ""}
+                  </p>
+                ))}
+              </div>
+            </details>
+          ) : null}
+
+          <label className="block max-w-md text-sm font-medium text-slate-800">
+            Общий временный пароль для новых пользователей
+            <input
               type="password"
-              value={accessCode}
-              placeholder="Задайте пароль перед импортом"
-              onChange={(value) => {
-                setCopiedAccessCode(false);
-                onAccessCodeChange(value);
-              }}
+              value={temporaryPassword}
+              onChange={(event) => onTemporaryPasswordChange(event.target.value)}
+              autoComplete="new-password"
+              minLength={6}
+              maxLength={128}
               required
+              placeholder="Минимум 6 символов, буква и цифра"
+              className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-slate-950 outline-none focus:border-[#ea6a00]"
             />
+            <span className="mt-1 block text-xs font-normal text-slate-500">
+              Пароль не сохраняется в истории импорта. Действующие пароли не изменятся.
+            </span>
+          </label>
 
-            <button
-              type="button"
-              onClick={() => void copyAccessCode()}
-              disabled={!accessCode}
-              className="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-200 px-4 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <Copy size={17} />
-              {copiedAccessCode ? "Скопировано" : "Скопировать пароль"}
-            </button>
-
-            <button
-              type="submit"
-              disabled={isSubmitting || preview.validUsers.length === 0}
-              className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#ea6a00] px-5 py-2.5 text-sm font-semibold text-white hover:bg-[#cf5e00] disabled:cursor-wait disabled:opacity-60"
-            >
-              <UserCheck size={17} />
-              {isSubmitting ? "Импортируем..." : "Импортировать"}
-            </button>
-          </div>
-
-          <label className="flex items-start gap-3 rounded-lg border border-slate-200 p-3 text-sm text-slate-600">
+          {!preview.isActiveUsersReport ? <label className="flex items-start gap-3 rounded-lg border border-slate-200 p-3 text-sm text-slate-600">
             <input
               type="checkbox"
               checked={archiveMissing}
@@ -1789,7 +2024,18 @@ function CrmImportPanel({
               не удаляется. Оставляйте включенным только для полной CRM-выгрузки,
               а не частичной выборки.
             </span>
-          </label>
+          </label> : null}
+
+          <div className="flex justify-end">
+            <button
+              type="submit"
+              disabled={isSubmitting || preview.validUsers.length === 0 || !temporaryPassword}
+              className="inline-flex items-center justify-center gap-2 rounded-lg bg-[#ea6a00] px-5 py-2.5 text-sm font-semibold text-white hover:bg-[#cf5e00] disabled:cursor-wait disabled:opacity-60"
+            >
+              <UserCheck size={17} />
+              {isSubmitting ? "Импортируем..." : "Импортировать"}
+            </button>
+          </div>
         </div>
       ) : null}
     </form>
@@ -1809,35 +2055,40 @@ function UsersWorkspace({
   users,
   onUpdate,
   manualUserForm,
+  trainingGroups,
   importPreview,
-  importAccessCode,
+  importConflicts,
   importArchiveMissing,
+  importTemporaryPassword,
   lastImport,
   isSubmitting,
   onManualUserChange,
   onManualUserSubmit,
-  onImportAccessCodeChange,
   onImportArchiveMissingChange,
+  onImportTemporaryPasswordChange,
   onImportFile,
   onWebImportSubmit
 }: {
   users: AccessUser[];
   onUpdate: (id: string, payload: Partial<AccessUser>) => Promise<void>;
   manualUserForm: typeof initialManualUserForm;
+  trainingGroups: TrainingGroup[];
   importPreview: ImportPreview | null;
-  importAccessCode: string;
+  importConflicts: ImportConflict[];
   importArchiveMissing: boolean;
+  importTemporaryPassword: string;
   lastImport: ImportHistoryItem | null;
   isSubmitting: boolean;
   onManualUserChange: (form: typeof initialManualUserForm) => void;
   onManualUserSubmit: (event: FormEvent<HTMLFormElement>) => void;
-  onImportAccessCodeChange: (value: string) => void;
   onImportArchiveMissingChange: (value: boolean) => void;
+  onImportTemporaryPasswordChange: (value: string) => void;
   onImportFile: (file: File | null) => Promise<void>;
   onWebImportSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<"active" | "archived" | "all">("active");
+  const [roleFilter, setRoleFilter] = useState<"all" | "missing" | TrainingRole>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const normalizedSearch = search.trim().toLowerCase();
   const filteredUsers = users.filter((accessUser) => {
@@ -1848,6 +2099,9 @@ function UsersWorkspace({
     if (status === "archived" && !accessUser.archived) {
       return false;
     }
+
+    if (roleFilter === "missing" && accessUser.trainingRole) return false;
+    if (roleFilter !== "all" && roleFilter !== "missing" && accessUser.trainingRole !== roleFilter) return false;
 
     if (!normalizedSearch) {
       return true;
@@ -1870,20 +2124,22 @@ function UsersWorkspace({
 
   return (
     <div className="space-y-5">
-      <WeeklyCodeGenerator />
       <CrmImportPanel
         preview={importPreview}
-        accessCode={importAccessCode}
+        conflicts={importConflicts}
         archiveMissing={importArchiveMissing}
+        temporaryPassword={importTemporaryPassword}
         lastImport={lastImport}
         isSubmitting={isSubmitting}
-        onAccessCodeChange={onImportAccessCodeChange}
         onArchiveMissingChange={onImportArchiveMissingChange}
+        onTemporaryPasswordChange={onImportTemporaryPasswordChange}
         onFile={onImportFile}
         onSubmit={onWebImportSubmit}
       />
+      <WeeklyCodeGenerator />
       <ManualUserCreateForm
         form={manualUserForm}
+        groups={trainingGroups}
         isSubmitting={isSubmitting}
         onFormChange={onManualUserChange}
         onSubmit={onManualUserSubmit}
@@ -1905,17 +2161,31 @@ function UsersWorkspace({
               </p>
             ) : null}
           </div>
-          <div className="relative w-full lg:max-w-sm">
-            <Search
-              size={17}
-              className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
-            />
-            <input
-              value={search}
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="Имя, логин, телефон или ID"
-              className="w-full rounded-lg border border-slate-200 py-2.5 pl-10 pr-3 text-sm outline-none transition focus:border-[#ea6a00] focus:ring-2 focus:ring-orange-100"
-            />
+          <div className="flex w-full flex-wrap gap-2 lg:w-auto">
+            <div className="relative min-w-0 flex-1 lg:w-72">
+              <Search
+                size={17}
+                className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
+              />
+              <input
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Имя, логин, телефон или ID"
+                className="w-full rounded-lg border border-slate-200 py-2.5 pl-10 pr-3 text-sm outline-none transition focus:border-[#ea6a00] focus:ring-2 focus:ring-orange-100"
+              />
+            </div>
+            <select
+              value={roleFilter}
+              onChange={(event) => setRoleFilter(event.target.value as typeof roleFilter)}
+              aria-label="Фильтр по учебной роли"
+              className="rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700"
+            >
+              <option value="all">Все роли</option>
+              <option value="missing">Без роли</option>
+              {Object.entries(TRAINING_ROLE_LABELS).filter(([role]) => role !== "ADMIN").map(([role, label]) => (
+                <option key={role} value={role}>{label}</option>
+              ))}
+            </select>
           </div>
         </div>
         <div className="mt-4 flex flex-wrap gap-2">
@@ -1962,6 +2232,10 @@ function UsersWorkspace({
                       </span>
                       <span className="mt-1 block truncate text-xs text-slate-500">
                         {accessUser.login}
+                      </span>
+                      <span className="mt-1 block truncate text-[11px] text-slate-500">
+                        {accessUser.trainingRole ? TRAINING_ROLE_LABELS[accessUser.trainingRole] : "Без учебной роли"}
+                        {accessUser.trainingRoleManual ? " · вручную" : ""}
                       </span>
                       {accessUser.manual ? (
                         <span className="mt-2 inline-flex rounded-full bg-orange-50 px-2 py-0.5 text-[11px] font-medium text-[#b95200]">
@@ -2019,10 +2293,41 @@ function UserEditor({
   const [resetting, setResetting] = useState(false);
   const [impersonationMessage, setImpersonationMessage] = useState("");
   const [impersonating, setImpersonating] = useState(false);
+  const [trainingRole, setTrainingRole] = useState<"auto" | "HEAD" | "MANAGER" | "EMPLOYEE" | "PARTNER">(
+    accessUser.trainingRoleManual && ["HEAD", "MANAGER", "EMPLOYEE", "PARTNER"].includes(accessUser.trainingRole ?? "")
+      ? accessUser.trainingRole as "HEAD" | "MANAGER" | "EMPLOYEE" | "PARTNER"
+      : "auto"
+  );
+  const [roleSaving, setRoleSaving] = useState(false);
+  const [roleMessage, setRoleMessage] = useState("");
   const passwordInputRef = useRef<HTMLInputElement>(null);
 
+  async function saveTrainingRole() {
+    if (!auth?.currentUser || roleSaving) return;
+    setRoleSaving(true);
+    setRoleMessage("");
+    try {
+      const idToken = await auth.currentUser.getIdToken(true);
+      const response = await fetch("/api/admin/set-training-role", {
+        method: "POST",
+        headers: { authorization: `Bearer ${idToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ uid: accessUser.id, role: trainingRole }),
+        cache: "no-store"
+      });
+      const result = (await response.json()) as { message?: string };
+      if (!response.ok) throw new Error(result.message ?? "Не удалось сохранить учебную роль.");
+      setRoleMessage("Учебная роль сохранена.");
+    } catch (error) {
+      setRoleMessage(error instanceof Error ? error.message : "Не удалось сохранить учебную роль.");
+    } finally {
+      setRoleSaving(false);
+    }
+  }
+
   async function impersonate() {
-    if (!auth?.currentUser || !accessUser.active || accessUser.archived || accessUser.passwordResetRequested) return;
+    if (!auth?.currentUser || !accessUser.active || accessUser.archived ||
+        accessUser.passwordResetRequested || accessUser.claimState === "unclaimed" ||
+        accessUser.claimState === "claiming" || accessUser.claimState === "manual_review") return;
     if (!window.confirm(`Войти под ${accessUser.displayName}? Все действия будут сохранены от имени сотрудника. Для возврата к админке потребуется войти снова.`)) return;
     setImpersonating(true);
     setImpersonationMessage("");
@@ -2087,6 +2392,10 @@ function UserEditor({
           >
             {accessUser.archived
               ? "В архиве"
+              : accessUser.claimState === "unclaimed"
+                ? "Ожидает активации"
+              : accessUser.claimState === "manual_review"
+                ? "Нужна проверка"
               : accessUser.active
                 ? "Активен"
                 : "Заблокирован"}
@@ -2100,12 +2409,13 @@ function UserEditor({
         </p>
         <div className="mt-4 flex flex-wrap gap-2">
           <button type="button" onClick={() => void impersonate()}
-            disabled={impersonating || !accessUser.active || accessUser.archived || accessUser.passwordResetRequested}
+            disabled={impersonating || !accessUser.active || accessUser.archived || accessUser.passwordResetRequested || accessUser.claimState !== "claimed"}
             className="inline-flex items-center gap-2 rounded-lg bg-[#ea6a00] px-3 py-2 text-sm font-semibold text-white hover:bg-[#cf5e00] disabled:cursor-not-allowed disabled:opacity-50">
             <LogIn size={16} />{impersonating ? "Входим..." : "Войти под пользователем"}
           </button>
           <button type="button" onClick={() => passwordInputRef.current?.focus()}
-            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
+            disabled={accessUser.claimState !== "claimed"}
+            className="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50">
             <KeyRound size={16} />Сбросить пароль
           </button>
         </div>
@@ -2115,12 +2425,36 @@ function UserEditor({
       <div className="grid gap-4 md:grid-cols-2">
         <TextField label="Имя" value={displayName} onChange={setDisplayName} />
         <TextField label="Название офиса" value={office} onChange={setOffice} />
-        <label className="text-sm font-medium text-slate-700">
-          Роль
-          <span className="mt-2 block rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5 font-normal text-slate-600">
-            Пользователь
-          </span>
-        </label>
+        <div className="text-sm font-medium text-slate-700">
+          <label htmlFor={`training-role-${accessUser.id}`}>Учебная роль</label>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <select
+              id={`training-role-${accessUser.id}`}
+              value={trainingRole}
+              onChange={(event) => setTrainingRole(event.target.value as typeof trainingRole)}
+              className="min-w-0 flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2.5 font-normal text-slate-900"
+            >
+              <option value="auto" disabled={!accessUser.crmUserTypes?.length}>По данным CRM</option>
+              <option value="HEAD">Руководитель</option>
+              <option value="MANAGER">Менеджер</option>
+              <option value="EMPLOYEE">Сотрудник</option>
+              <option value="PARTNER">Партнёр</option>
+            </select>
+            <button
+              type="button"
+              onClick={() => void saveTrainingRole()}
+              disabled={roleSaving || (trainingRole === "auto" && !accessUser.crmUserTypes?.length)}
+              className="rounded-lg border border-[#ea6a00] px-3 py-2.5 font-semibold text-[#c95b00] hover:bg-orange-50 disabled:opacity-50"
+            >
+              {roleSaving ? "Сохраняем..." : "Применить"}
+            </button>
+          </div>
+          <p className="mt-1 text-xs font-normal text-slate-500">
+            Текущая: {accessUser.trainingRole ? TRAINING_ROLE_LABELS[accessUser.trainingRole] : "Не назначена"}
+            {accessUser.trainingRoleManual ? " · назначена вручную" : " · по CRM"}
+          </p>
+          {roleMessage ? <p role="status" className="mt-1 text-xs font-normal text-slate-700">{roleMessage}</p> : null}
+        </div>
         <TextField label="Контактная почта" value={email} onChange={setEmail} />
         <TextField label="Телефон" value={phone} onChange={setPhone} />
       </div>
@@ -2131,9 +2465,8 @@ function UserEditor({
           <div>
             <p className="text-sm font-semibold text-slate-800">Пароль</p>
             <p className="mt-1 text-sm leading-6 text-slate-500">
-              Пользователь входит с личным паролем. Первоначальный пароль
-              назначается при создании аккаунта и обязательно меняется самим
-              пользователем при первом входе.
+              Новые пользователи входят с общим временным паролем и обязательно
+              заменяют его личным. Пароль действующих сотрудников импорт не меняет.
             </p>
           </div>
         </div>
@@ -2156,7 +2489,7 @@ function UserEditor({
           <button
             type="button"
             onClick={() => void resetPassword()}
-            disabled={resetting || !accessUser.active || accessUser.archived}
+            disabled={resetting || !accessUser.active || accessUser.archived || accessUser.claimState !== "claimed"}
             className="inline-flex items-center justify-center gap-2 rounded-lg border border-[#ea6a00] px-4 py-2.5 text-sm font-semibold text-[#c95b00] hover:bg-orange-50 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <KeyRound size={16} />
@@ -2174,8 +2507,7 @@ function UserEditor({
               displayName,
               office,
               email,
-              phone,
-              role: "user"
+              phone
             })
           }
           className="inline-flex items-center gap-2 rounded-lg bg-[#ea6a00] px-4 py-2.5 text-sm font-semibold text-white hover:bg-[#cf5e00]"
@@ -2242,11 +2574,11 @@ function WeeklyCodeGenerator() {
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <h3 className="text-lg font-semibold text-slate-950">
-            Генератор первоначального пароля
+            Генератор временного пароля
           </h3>
           <p className="mt-1 max-w-2xl text-sm leading-6 text-slate-500">
-            Сгенерируйте временный пароль для новых пользователей перед импортом.
-            После первого входа каждый сотрудник обязательно заменит его личным.
+            Сгенерированный пароль можно использовать для импорта или ручного
+            добавления. После первого входа сотрудник заменит его личным.
           </p>
         </div>
         <button
@@ -2443,6 +2775,7 @@ function MaterialEditor({
   const [url, setUrl] = useState(material.url);
   const [testUrl, setTestUrl] = useState(material.testUrl ?? "");
   const [format, setFormat] = useState(material.tab === "webinars" ? videoFormat(material.format) : material.format);
+  const [duration, setDuration] = useState(material.duration);
   const [speakerName, setSpeakerName] = useState(material.author.name);
   const [speakerCompany, setSpeakerCompany] = useState(
     material.author.company ?? ""
@@ -2451,13 +2784,14 @@ function MaterialEditor({
     material.trendingStamp ?? ""
   );
   const navigate = useEditorNavigation();
-  const payload = { hiddenFromLibrary, title, description, url, testUrl, coverUrl, format,
+  const payload = { hiddenFromLibrary, title, description, url, testUrl, coverUrl, format, duration,
     category: material.tab === "webinars" ? splitCategories(category, allTopicOptions) : splitList(category), tags: splitList(tags),
     ...(material.tab === "webinars" ? { author: { name: speakerName, company: speakerCompany }, trendingStamp: trendingStamp || null } : {}) };
   const save = useEditorDraft(payload, () => onUpdate(material.id, payload), () => {
     setTitle(material.title); setDescription(material.description); setUrl(material.url);
     setHiddenFromLibrary(material.hiddenFromLibrary ?? false); setTestUrl(material.testUrl ?? "");
     setCoverUrl(material.coverUrl ?? ""); setFormat(material.tab === "webinars" ? videoFormat(material.format) : material.format);
+    setDuration(material.duration);
     setCategory(material.category.join(", ")); setTags((material.tags ?? []).join(", "));
     setSpeakerName(material.author.name); setSpeakerCompany(material.author.company ?? "");
     setTrendingStamp(material.trendingStamp ?? "");
@@ -2481,6 +2815,8 @@ function MaterialEditor({
             </select>
           </label>
         ) : <TextField label="Формат" value={format} onChange={setFormat} />}
+        <TextField label="Длительность, минут" type="number" value={String(duration)}
+          onChange={(value) => setDuration(Number(value))} required />
         <TextField label="URL" value={url} onChange={setUrl} />
         <TextField
           label="Ссылка на тестирование"

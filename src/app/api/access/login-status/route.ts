@@ -153,6 +153,7 @@ async function findAccessUser(token: string, normalizedLogin: string) {
       fields?: {
         active?: { booleanValue?: boolean };
         archived?: { booleanValue?: boolean };
+        claimState?: { stringValue?: string };
       };
     };
   }>;
@@ -184,6 +185,14 @@ export async function POST(request: NextRequest) {
     }
 
     if (accessUser.active?.booleanValue !== true) {
+      return json({ status: "blocked" });
+    }
+
+    if (accessUser.claimState?.stringValue === "unclaimed") {
+      return json({ status: "unclaimed" });
+    }
+
+    if (accessUser.claimState?.stringValue === "manual_review") {
       return json({ status: "blocked" });
     }
 

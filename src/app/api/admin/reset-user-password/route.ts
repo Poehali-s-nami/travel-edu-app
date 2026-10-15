@@ -82,9 +82,17 @@ export async function POST(request: NextRequest) {
     });
     if (found.status === 404) return response("Пользователь не найден.", 404);
     if (!found.ok) throw new Error("Could not load access user");
-    const record = (await found.json()) as { fields?: { active?: { booleanValue?: boolean }; archived?: { booleanValue?: boolean } } };
+    const record = (await found.json()) as { fields?: {
+      active?: { booleanValue?: boolean };
+      archived?: { booleanValue?: boolean };
+      claimState?: { stringValue?: string };
+    } };
     if (record.fields?.active?.booleanValue !== true || record.fields?.archived?.booleanValue === true) {
       return response("Сначала активируйте пользователя.", 400);
+    }
+    if (record.fields.claimState?.stringValue &&
+        record.fields.claimState.stringValue !== "claimed") {
+      return response("Сотрудник ещё не создал личный пароль.", 409);
     }
 
     const now = new Date().toISOString();
