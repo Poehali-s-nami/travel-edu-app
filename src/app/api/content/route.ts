@@ -13,6 +13,12 @@ const firestoreBase = `https://firestore.googleapis.com/v1/projects/${projectId}
 type Value = { stringValue?: string; booleanValue?: boolean; integerValue?: string; doubleValue?: number;
   timestampValue?: string; arrayValue?: { values?: Value[] }; mapValue?: { fields?: Record<string, Value> } };
 type Document = { name: string; fields?: Record<string, Value> };
+type CatalogItem = { id: string } & Record<string, unknown>;
+type Catalog = { materials: CatalogItem[]; tracks: CatalogItem[] };
+
+let catalogCache: { revision: string; expiresAt: number; value: Catalog } | null = null;
+let catalogLoad: { revision: string; promise: Promise<Catalog> } | null = null;
+const CATALOG_CACHE_MS = 60_000;
 
 function decode(value: Value): unknown {
   if ("stringValue" in value) return value.stringValue;
@@ -70,7 +76,7 @@ async function getDocument(token: string, path: string) {
   return (await response.json()) as Document;
 }
 
-async function listDocuments(token: string, collectionName: string): Promise<Array<{ id: string } & Record<string, unknown>>> {
+async function listDocuments(token: string, collectionName: string): Promise<CatalogItem[]> {
   const documents: Document[] = [];
   let pageToken = "";
   do {
@@ -84,6 +90,24 @@ async function listDocuments(token: string, collectionName: string): Promise<Arr
     pageToken = page.nextPageToken ?? "";
   } while (pageToken);
   return documents.map((document) => ({ ...decodeFields(document.fields), id: document.name.split("/").pop() ?? "" }));
+}
+
+async function loadCatalog(token: string, revision: string): Promise<Catalog> {
+  if (catalogCache?.revision === revision && catalogCache.expiresAt > Date.now()) return catalogCache.value;
+  if (catalogLoad?.revision === revision) return catalogLoad.promise;
+
+  const promise = Promise.all([listDocuments(token, "materials"), listDocuments(token, "tracks")])
+    .then(([materials, tracks]) => {
+      const value = { materials, tracks };
+      catalogCache = { revision, expiresAt: Date.now() + CATALOG_CACHE_MS, value };
+      return value;
+    });
+  catalogLoad = { revision, promise };
+  try {
+    return await promise;
+  } finally {
+    if (catalogLoad?.promise === promise) catalogLoad = null;
+  }
 }
 
 export async function GET(request: NextRequest) {
@@ -109,7 +133,9 @@ export async function GET(request: NextRequest) {
       return NextResponse.json({ message: "Нет доступа." }, { status: 403 });
     }
 
-    const [allMaterials, allTracks] = await Promise.all([listDocuments(token, "materials"), listDocuments(token, "tracks")]);
+    const catalogMeta = await getDocument(token, "catalogMeta/current");
+    const revision = catalogMeta?.fields?.revision?.stringValue ?? "legacy";
+    const { materials: allMaterials, tracks: allTracks } = await loadCatalog(token, revision);
     const restrictedGroupIds = new Set([...allMaterials, ...allTracks].flatMap((item) => {
       const audience = item.audience as ContentAudience | undefined;
       return audience?.mode === "restricted" ? strings(audience.groupIds) : [];

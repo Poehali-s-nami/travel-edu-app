@@ -65,6 +65,9 @@ test("content API returns only permitted documents and hides tracks with unavail
   const document = (collection, id, fields) => ({ name: `projects/test/databases/(default)/documents/${collection}/${id}`,
     fields: Object.fromEntries(Object.entries(fields).map(([key, item]) => [key, value(item)])) });
   const response = (data) => new Response(JSON.stringify(data), { status: 200, headers: { "content-type": "application/json" } });
+  let revision = "first";
+  let role = "MANAGER";
+  let catalogReads = 0;
 
   try {
     process.env.FIREBASE_SERVICE_ACCOUNT_JSON = JSON.stringify({ client_email: "test@example.com", private_key: "-----BEGIN PRIVATE KEY-----\nAA==\n-----END PRIVATE KEY-----" });
@@ -76,18 +79,19 @@ test("content API returns only permitted documents and hides tracks with unavail
       if (url.includes("accounts:lookup")) return response({ users: [{ localId: "uid-1", email: "user@example.com" }] });
       if (url.includes("oauth2.googleapis.com/token")) return response({ access_token: "service-token" });
       if (url.endsWith("/accessUsers/uid-1")) return response(document("accessUsers", "uid-1", {
-        active: true, archived: false, claimState: "claimed", trainingRole: "MANAGER", groupIds: ["pilot"]
+        active: true, archived: false, claimState: "claimed", trainingRole: role, groupIds: ["pilot"]
       }));
-      if (url.includes("/materials?")) return response({ documents: [
+      if (url.endsWith("/catalogMeta/current")) return response(document("catalogMeta", "current", { revision }));
+      if (url.includes("/materials?")) { catalogReads += 1; return response({ documents: [
         document("materials", "public", { title: "Public", archived: false }),
         document("materials", "head", { title: "Head", archived: false, audience: { mode: "restricted", roles: ["HEAD"], groupIds: [] } }),
         document("materials", "pilot", { title: "Pilot", archived: false, audience: { mode: "restricted", roles: [], groupIds: ["pilot"] } })
-      ] });
-      if (url.includes("/tracks?")) return response({ documents: [
+      ] }); }
+      if (url.includes("/tracks?")) { catalogReads += 1; return response({ documents: [
         document("tracks", "head-track", { title: "Head track", archived: false, materialIds: ["head"], audience: { mode: "restricted", roles: ["HEAD"], groupIds: [] } }),
         document("tracks", "incomplete-track", { title: "Incomplete track", archived: false, materialIds: ["public", "head", "pilot"], audience: { mode: "restricted", roles: [], groupIds: ["pilot"] } }),
         document("tracks", "pilot-track", { title: "Pilot track", archived: false, materialIds: ["public", "pilot"], audience: { mode: "restricted", roles: [], groupIds: ["pilot"] } })
-      ] });
+      ] }); }
       if (url.endsWith("/trainingGroups/pilot")) return response(document("trainingGroups", "pilot", { archived: false }));
       throw new Error(`Unexpected request: ${url}`);
     };
@@ -96,6 +100,22 @@ test("content API returns only permitted documents and hides tracks with unavail
     assert.deepEqual(result.data.materials.map((item) => item.id), ["public", "pilot"]);
     assert.deepEqual(result.data.tracks.map((item) => item.id), ["pilot-track"]);
     assert.deepEqual(result.data.tracks[0].materialIds, ["public", "pilot"]);
+    assert.equal(catalogReads, 2);
+
+    role = "HEAD";
+    const headResult = await route.GET(new Request("https://example.com/api/content", { headers: { authorization: "Bearer valid-token" } }));
+    assert.deepEqual(headResult.data.materials.map((item) => item.id), ["public", "head", "pilot"]);
+    assert.equal(catalogReads, 2, "Changing roles must reuse only the unfiltered catalog");
+
+    role = "MANAGER";
+    const managerAgain = await route.GET(new Request("https://example.com/api/content", { headers: { authorization: "Bearer valid-token" } }));
+    assert.deepEqual(managerAgain.data.materials.map((item) => item.id), ["public", "pilot"]);
+    assert.equal(catalogReads, 2);
+
+    revision = "second";
+    const refreshed = await route.GET(new Request("https://example.com/api/content", { headers: { authorization: "Bearer valid-token" } }));
+    assert.equal(refreshed.status, 200);
+    assert.equal(catalogReads, 4, "A content edit must reload both collections");
   } finally {
     globalThis.fetch = previousFetch;
     if (previousCrypto) Object.defineProperty(globalThis, "crypto", previousCrypto);

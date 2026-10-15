@@ -14,7 +14,6 @@ import {
 import {
   addDoc,
   collection,
-  deleteDoc,
   doc,
   getDoc,
   limit,
@@ -24,7 +23,10 @@ import {
   serverTimestamp,
   setDoc,
   Timestamp,
-  updateDoc
+  updateDoc,
+  writeBatch,
+  type Firestore,
+  type WriteBatch
 } from "firebase/firestore";
 import {
   Archive,
@@ -75,6 +77,13 @@ import type { AccessUser, TrainingRole } from "@/types/access-user";
 import type { TrainingGroup } from "@/types/training-group";
 
 const CRM_IMPORT_BATCH_SIZE = 12;
+
+function markCatalogChanged(batch: WriteBatch, firestore: Firestore) {
+  batch.set(doc(firestore, "catalogMeta", "current"), {
+    revision: crypto.randomUUID(),
+    updatedAt: serverTimestamp()
+  });
+}
 const PERSONAL_PASSWORD_PATTERN = /^(?=.*\p{L})(?=.*\d).{6,}$/u;
 const TRAINING_ROLE_LABELS: Record<TrainingRole, string> = {
   HEAD: "Руководитель",
@@ -707,7 +716,8 @@ function AdminWorkspace({
     setMessage("");
 
     try {
-      await addDoc(collection(db, "materials"), {
+      const batch = writeBatch(db);
+      batch.set(doc(collection(db, "materials")), {
         audience: materialForm.audience,
         title: materialForm.title.trim(),
         hiddenFromLibrary: materialForm.hiddenFromLibrary,
@@ -731,6 +741,8 @@ function AdminWorkspace({
         archived: false,
         createdAt: serverTimestamp()
       });
+      markCatalogChanged(batch, db);
+      await batch.commit();
 
       setMaterialForm({
         ...initialMaterialForm,
@@ -758,7 +770,8 @@ function AdminWorkspace({
     setMessage("");
 
     try {
-      await addDoc(collection(db, "tracks"), {
+      const batch = writeBatch(db);
+      batch.set(doc(collection(db, "tracks")), {
         audience: trackForm.audience,
         title: trackForm.title.trim(),
         description: trackForm.description.trim(),
@@ -770,6 +783,8 @@ function AdminWorkspace({
         archived: false,
         createdAt: serverTimestamp()
       });
+      markCatalogChanged(batch, db);
+      await batch.commit();
 
       setTrackForm(initialTrackForm);
       setTrackMaterialIds([]);
@@ -791,10 +806,11 @@ function AdminWorkspace({
     try {
       const materialRef = doc(db, "materials", id);
       const materialSnapshot = await getDoc(materialRef);
+      const batch = writeBatch(db);
 
       if (materialSnapshot.exists()) {
         const { author, ...fields } = payload;
-        await updateDoc(materialRef, {
+        batch.update(materialRef, {
           ...fields,
           ...(author ? { "author.name": author.name, "author.company": author.company ?? "" } : {})
         });
@@ -805,7 +821,7 @@ function AdminWorkspace({
           throw new Error(`Material ${id} was not found`);
         }
 
-        await setDoc(materialRef, {
+        batch.set(materialRef, {
           title: source.title,
           description: source.description,
           type: source.type,
@@ -830,6 +846,9 @@ function AdminWorkspace({
         });
       }
 
+      markCatalogChanged(batch, db);
+      await batch.commit();
+
       setMessage("Материал обновлен.");
       return true;
     } catch (error) {
@@ -847,9 +866,10 @@ function AdminWorkspace({
     try {
       const trackRef = doc(db, "tracks", id);
       const trackSnapshot = await getDoc(trackRef);
+      const batch = writeBatch(db);
 
       if (trackSnapshot.exists()) {
-        await updateDoc(trackRef, payload);
+        batch.update(trackRef, payload);
       } else {
         const source = tracks.find((track) => track.id === id);
 
@@ -857,7 +877,7 @@ function AdminWorkspace({
           throw new Error(`Track ${id} was not found`);
         }
 
-        await setDoc(trackRef, {
+        batch.set(trackRef, {
           title: source.title,
           description: source.description,
           materialIds: source.materialIds,
@@ -870,6 +890,9 @@ function AdminWorkspace({
           ...payload
         });
       }
+
+      markCatalogChanged(batch, db);
+      await batch.commit();
 
       setMessage("Трек обновлен.");
       return true;
@@ -885,7 +908,10 @@ function AdminWorkspace({
       return;
     }
 
-    await deleteDoc(doc(db, collectionName, id));
+    const batch = writeBatch(db);
+    batch.delete(doc(db, collectionName, id));
+    markCatalogChanged(batch, db);
+    await batch.commit();
     setMessage("Запись удалена.");
   }
 

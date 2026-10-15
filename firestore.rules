@@ -46,6 +46,10 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
+    match /catalogMeta/{metaId} {
+      allow read, write: if isAdmin();
+    }
+
     match /trainingGroups/{groupId} {
       allow read: if isActiveUser();
       allow write: if isAdmin();
