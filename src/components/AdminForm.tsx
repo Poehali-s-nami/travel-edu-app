@@ -77,6 +77,7 @@ import type { AccessUser, TrainingRole } from "@/types/access-user";
 import type { TrainingGroup } from "@/types/training-group";
 
 const CRM_IMPORT_BATCH_SIZE = 12;
+const CRM_IMPORT_REQUEST_SIZE = 4;
 const CRM_IMPORT_MAX_ATTEMPTS = 4;
 const CRM_IMPORT_CHECKPOINT_KEY = "psn-hub-crm-import-checkpoint-v1";
 
@@ -1198,100 +1199,113 @@ function AdminWorkspace({
 
       for (let batchIndex = startBatchIndex; batchIndex < batches.length; batchIndex += 1) {
         const batch = batches[batchIndex];
-        let batchResult: ImportBatchResult | null = null;
+        const requestBatches: ParsedImportUser[][] = [];
+        const confirmedImportedBeforeBatch = result.imported;
+        for (let index = 0; index < batch.length; index += CRM_IMPORT_REQUEST_SIZE) {
+          requestBatches.push(batch.slice(index, index + CRM_IMPORT_REQUEST_SIZE));
+        }
 
-        for (let attempt = 1; attempt <= CRM_IMPORT_MAX_ATTEMPTS; attempt += 1) {
-          setMessage(
-            `Импорт пользователей: партия ${batchIndex + 1} из ${batches.length}${attempt > 1 ? `, повтор ${attempt} из ${CRM_IMPORT_MAX_ATTEMPTS}` : ""}.`
-          );
+        for (let requestIndex = 0; requestIndex < requestBatches.length; requestIndex += 1) {
+          const requestBatch = requestBatches[requestIndex];
+          const isFinalRequest =
+            batchIndex === batches.length - 1 &&
+            requestIndex === requestBatches.length - 1;
+          let batchResult: ImportBatchResult | null = null;
 
-          let response: Response;
-          try {
-            response = await fetch("/api/admin/import-users", {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({
-                idToken: await user.getIdToken(attempt > 1),
-                temporaryPassword: importTemporaryPassword,
-                blockedCrmIdsWithoutLogin: batchIndex === batches.length - 1
-                  ? importPreview.blockedCrmIdsWithoutLogin
-                  : undefined,
-                archiveMissing: !importPreview.isActiveUsersReport && importArchiveMissing && batchIndex === batches.length - 1,
-                allCrmIds:
-                  !importPreview.isActiveUsersReport && importArchiveMissing && batchIndex === batches.length - 1
-                    ? importPreview.validUsers
-                        .map((importUser) => importUser.crmId)
-                        .filter(Boolean)
+          for (let attempt = 1; attempt <= CRM_IMPORT_MAX_ATTEMPTS; attempt += 1) {
+            setMessage(
+              `Импорт пользователей: партия ${batchIndex + 1} из ${batches.length}, этап ${requestIndex + 1} из ${requestBatches.length}${attempt > 1 ? `, повтор ${attempt} из ${CRM_IMPORT_MAX_ATTEMPTS}` : ""}.`
+            );
+
+            let response: Response;
+            try {
+              response = await fetch("/api/admin/import-users", {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({
+                  idToken: await user.getIdToken(attempt > 1),
+                  temporaryPassword: importTemporaryPassword,
+                  blockedCrmIdsWithoutLogin: isFinalRequest
+                    ? importPreview.blockedCrmIdsWithoutLogin
                     : undefined,
-                allUserKeys:
-                  !importPreview.isActiveUsersReport && importArchiveMissing && batchIndex === batches.length - 1
-                    ? Array.from(
-                        new Set(
-                          importPreview.validUsers.flatMap((importUser) => [
-                            importUser.crmId.trim()
-                              ? `crm:${importUser.crmId.trim()}`
-                              : "",
-                            `login:${normalizeLogin(importUser.login)}`,
-                          ]).filter(Boolean)
+                  archiveMissing: !importPreview.isActiveUsersReport && importArchiveMissing && isFinalRequest,
+                  allCrmIds:
+                    !importPreview.isActiveUsersReport && importArchiveMissing && isFinalRequest
+                      ? importPreview.validUsers
+                          .map((importUser) => importUser.crmId)
+                          .filter(Boolean)
+                      : undefined,
+                  allUserKeys:
+                    !importPreview.isActiveUsersReport && importArchiveMissing && isFinalRequest
+                      ? Array.from(
+                          new Set(
+                            importPreview.validUsers.flatMap((importUser) => [
+                              importUser.crmId.trim()
+                                ? `crm:${importUser.crmId.trim()}`
+                                : "",
+                              `login:${normalizeLogin(importUser.login)}`,
+                            ]).filter(Boolean)
+                          )
                         )
-                      )
-                    : undefined,
-                users: batch
-              })
-            });
-          } catch {
-            if (attempt === CRM_IMPORT_MAX_ATTEMPTS) {
+                      : undefined,
+                  users: requestBatch
+                })
+              });
+            } catch {
+              if (attempt === CRM_IMPORT_MAX_ATTEMPTS) {
+                throw new Error(
+                  `Импорт остановлен на партии ${batchIndex + 1} из ${batches.length}: сервер недоступен после ${CRM_IMPORT_MAX_ATTEMPTS} попыток. Уже подтверждено: ${confirmedImportedBeforeBatch} пользователей. Точка продолжения сохранена.`
+                );
+              }
+              await waitForImportRetry(1500 * attempt);
+              continue;
+            }
+
+            const responseText = await response.text();
+            try {
+              batchResult = JSON.parse(responseText) as ImportBatchResult;
+            } catch {
+              batchResult = null;
+            }
+
+            if (response.ok && batchResult) {
+              break;
+            }
+
+            const isTemporaryFailure =
+              !batchResult ||
+              response.status === 408 ||
+              response.status === 425 ||
+              response.status === 429 ||
+              response.status >= 500;
+
+            if (!isTemporaryFailure || attempt === CRM_IMPORT_MAX_ATTEMPTS) {
+              const responseKind = batchResult
+                ? batchResult.message ?? "Не удалось выполнить импорт."
+                : `сервер вернул HTML или другой некорректный ответ (HTTP ${response.status})`;
               throw new Error(
-                `Импорт остановлен на партии ${batchIndex + 1} из ${batches.length}: сервер недоступен после ${CRM_IMPORT_MAX_ATTEMPTS} попыток. Уже подтверждено: ${result.imported} пользователей. Точка продолжения сохранена.`
+                `Импорт остановлен на партии ${batchIndex + 1} из ${batches.length}: ${responseKind} Уже подтверждено: ${confirmedImportedBeforeBatch} пользователей. Точка продолжения сохранена.`
               );
             }
+
             await waitForImportRetry(1500 * attempt);
-            continue;
           }
 
-          const responseText = await response.text();
-          try {
-            batchResult = JSON.parse(responseText) as ImportBatchResult;
-          } catch {
-            batchResult = null;
-          }
-
-          if (response.ok && batchResult) {
-            break;
-          }
-
-          const isTemporaryFailure =
-            !batchResult ||
-            response.status === 408 ||
-            response.status === 425 ||
-            response.status === 429 ||
-            response.status >= 500;
-
-          if (!isTemporaryFailure || attempt === CRM_IMPORT_MAX_ATTEMPTS) {
-            const responseKind = batchResult
-              ? batchResult.message ?? "Не удалось выполнить импорт."
-              : `сервер вернул HTML или другой некорректный ответ (HTTP ${response.status})`;
+          if (!batchResult) {
             throw new Error(
-              `Импорт остановлен на партии ${batchIndex + 1} из ${batches.length}: ${responseKind} Уже подтверждено: ${result.imported} пользователей. Точка продолжения сохранена.`
+              `Импорт остановлен на партии ${batchIndex + 1} из ${batches.length}. Точка продолжения сохранена.`
             );
           }
 
-          await waitForImportRetry(1500 * attempt);
+          result.created += batchResult.created ?? 0;
+          result.updated += batchResult.updated ?? 0;
+          result.skipped += batchResult.skipped ?? 0;
+          result.imported += batchResult.imported ?? 0;
+          result.rotatedPasswords += batchResult.rotatedPasswords ?? 0;
+          result.archivedWithoutLogin += batchResult.archivedWithoutLogin ?? 0;
+          conflicts.push(...(batchResult.conflicts ?? []));
         }
 
-        if (!batchResult) {
-          throw new Error(
-            `Импорт остановлен на партии ${batchIndex + 1} из ${batches.length}. Точка продолжения сохранена.`
-          );
-        }
-
-        result.created += batchResult.created ?? 0;
-        result.updated += batchResult.updated ?? 0;
-        result.skipped += batchResult.skipped ?? 0;
-        result.imported += batchResult.imported ?? 0;
-        result.rotatedPasswords += batchResult.rotatedPasswords ?? 0;
-        result.archivedWithoutLogin += batchResult.archivedWithoutLogin ?? 0;
-        conflicts.push(...(batchResult.conflicts ?? []));
         writeImportCheckpoint({
           fileKey: importFileKey,
           totalBatches: batches.length,
