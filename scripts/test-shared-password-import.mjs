@@ -237,6 +237,53 @@ test("weekly import replaces only the previous CRM temporary password", async ()
   assert.equal("passwordPolicyVersion" in state.commits[0].writes[0].update.fields, false);
 });
 
+test("weekly import migrates a legacy CRM shared password without a policy marker", async () => {
+  const legacy = profile("crm-1", "first");
+  delete legacy.fields.passwordPolicyVersion;
+  delete legacy.fields.claimState;
+  const state = setup({
+    profiles: [legacy],
+    authUsers: [{ localId: "crm-1", email: "old@example.invalid" }]
+  });
+  const response = await importUsers([user("crm-1", "first")], "NewWeek2");
+  assert.equal(response.status, 200);
+  assert.equal(response.data.rotatedPasswords, 1);
+  assert.deepEqual(state.updated.filter((item) => item.password).map((item) => item.password), ["NewWeek2"]);
+  const fields = state.commits[0].writes[0].update.fields;
+  assert.equal(fields.passwordResetRequested.booleanValue, true);
+  assert.equal(fields.passwordPolicyVersion.integerValue, "0");
+});
+
+test("weekly import also migrates a legacy CRM profile with no reset flag", async () => {
+  const legacy = profile("crm-1", "first");
+  delete legacy.fields.passwordPolicyVersion;
+  delete legacy.fields.passwordResetRequested;
+  const state = setup({
+    profiles: [legacy],
+    authUsers: [{ localId: "crm-1", email: "old@example.invalid" }]
+  });
+  const response = await importUsers([user("crm-1", "first")], "NewWeek2");
+  assert.equal(response.status, 200);
+  assert.equal(response.data.rotatedPasswords, 1);
+  assert.equal(state.commits[0].writes[0].update.fields.passwordResetRequested.booleanValue, true);
+});
+
+test("legacy CRM password is not rotated after a personal password change", async () => {
+  const personal = profile("crm-1", "first");
+  delete personal.fields.passwordPolicyVersion;
+  delete personal.fields.passwordResetRequested;
+  personal.fields.passwordChangedAt = { timestampValue: new Date().toISOString() };
+  const state = setup({
+    profiles: [personal],
+    authUsers: [{ localId: "crm-1", email: "old@example.invalid" }]
+  });
+  const response = await importUsers([user("crm-1", "first")], "NewWeek2");
+  assert.equal(response.status, 200);
+  assert.equal(response.data.rotatedPasswords, 0);
+  assert.equal(state.updated.some((item) => "password" in item), false);
+  assert.equal("passwordResetRequested" in state.commits[0].writes[0].update.fields, false);
+});
+
 test("weekly import leaves admin-reset and manually created account passwords untouched", async () => {
   const adminReset = temporaryProfile("crm-1", "first");
   adminReset.fields.passwordPolicyVersion = { integerValue: "1" };
@@ -284,6 +331,22 @@ test("failed weekly password rotation is reported without claiming success", asy
   assert.equal(response.data.rotatedPasswords, 0);
   assert.equal(response.data.conflicts.length, 1);
   assert.equal(state.updated.some((item) => item.password === "NewWeek2"), true, JSON.stringify(response.data));
+});
+
+test("failed legacy password rotation still requires a personal password on next login", async () => {
+  const legacy = profile("crm-1", "first");
+  delete legacy.fields.passwordPolicyVersion;
+  delete legacy.fields.passwordResetRequested;
+  const state = setup({
+    profiles: [legacy],
+    authUsers: [{ localId: "crm-1", email: "old@example.invalid" }],
+    failPasswordRotation: true
+  });
+  const response = await importUsers([user("crm-1", "first")], "NewWeek2");
+  assert.equal(response.status, 200);
+  assert.equal(response.data.rotatedPasswords, 0);
+  assert.equal(response.data.conflicts.length, 1);
+  assert.equal(state.commits[0].writes[0].update.fields.passwordResetRequested.booleanValue, true);
 });
 
 test("repeat import preserves a manually assigned training role", async () => {

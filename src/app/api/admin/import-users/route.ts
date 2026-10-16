@@ -321,7 +321,8 @@ function accessUserWrite(
   user: ImportUser,
   isNewUser: boolean,
   trainingRoleManual: boolean,
-  provisionedAuth: boolean
+  provisionedAuth: boolean,
+  rotateLegacyPassword: boolean
 ) {
   const normalizedLogin = normalizeLogin(user.login);
   const fields: Record<string, Record<string, unknown>> = {
@@ -338,6 +339,9 @@ function accessUserWrite(
   };
   if (isNewUser || provisionedAuth) {
     fields.passwordResetRequested = firestoreValue(provisionedAuth);
+    fields.passwordPolicyVersion = firestoreValue(0);
+  } else if (rotateLegacyPassword) {
+    fields.passwordResetRequested = firestoreValue(true);
     fields.passwordPolicyVersion = firestoreValue(0);
   }
   if (user.officeIds) fields.officeIds = firestoreStringArray(user.officeIds);
@@ -436,7 +440,7 @@ function accessUserRecord(document: AccessUserDocument): AccessUserRecord {
 
 function canRotateWeeklyPassword(user: AccessUserRecord) {
   return user.source === "crm" && user.claimState === "claimed" &&
-    user.passwordResetRequested && user.passwordPolicyVersion === 0 && !user.passwordChangedAt;
+    user.passwordPolicyVersion === 0 && !user.passwordChangedAt;
 }
 
 async function listAccessUsers(token: string) {
@@ -690,6 +694,8 @@ export async function POST(request: NextRequest) {
         (!identity.existing || identity.existing.claimState === "unclaimed");
       const rotateExistingPassword = user.active && !provisionedAuth &&
         Boolean(identity.existing && canRotateWeeklyPassword(identity.existing));
+      const rotateLegacyPassword = rotateExistingPassword &&
+        !identity.existing?.passwordResetRequested;
       if (!identity.existing) {
         if (await findAuthUserById(accessToken, identity.uid) ||
             await findAuthUserByEmail(accessToken, authEmail)) {
@@ -762,7 +768,8 @@ export async function POST(request: NextRequest) {
           { ...user, crmId, login: effectiveLogin },
           !identity.existing,
           identity.existing?.trainingRoleManual ?? false,
-          provisionedAuth
+          provisionedAuth,
+          rotateLegacyPassword
         )
       );
 
