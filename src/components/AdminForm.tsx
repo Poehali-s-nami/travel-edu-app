@@ -77,8 +77,8 @@ import type { AccessUser, TrainingRole } from "@/types/access-user";
 import type { TrainingGroup } from "@/types/training-group";
 
 const CRM_IMPORT_BATCH_SIZE = 12;
-const CRM_IMPORT_REQUEST_SIZE = 4;
-const CRM_IMPORT_MAX_ATTEMPTS = 4;
+const CRM_IMPORT_REQUEST_SIZE = 2;
+const CRM_IMPORT_MAX_ATTEMPTS = 6;
 const CRM_IMPORT_CHECKPOINT_KEY = "psn-hub-crm-import-checkpoint-v1";
 
 function markCatalogChanged(batch: WriteBatch, firestore: Firestore) {
