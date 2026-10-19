@@ -2,7 +2,7 @@
 
 import dynamic from "next/dynamic";
 import { motion } from "framer-motion";
-import { Mail, Phone } from "lucide-react";
+import { Phone } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GlobeMethods } from "react-globe.gl";
 // Three 0.185 ships the runtime without TypeScript declarations.
@@ -251,18 +251,18 @@ export default function AnimatedTravelHero() {
         />
       </div>
 
-      <div className="absolute bottom-10 z-20 flex flex-col items-center gap-2 text-sm font-light tracking-wide text-white/50 [font-family:'Lato',Arial,sans-serif]">
-        <p>Администратор системы</p>
-        <div className="flex items-center gap-6">
-          <div className="flex items-center gap-2">
-            <Phone size={14} />
-            <span>+7 708 491 4880</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <Mail size={14} />
-            <span>psnkzeducation@gmail.com</span>
-          </div>
+      <div className="absolute bottom-8 z-20 flex max-w-lg flex-col items-center gap-1.5 px-6 text-center font-light tracking-wide text-white/50 [font-family:'Lato',Arial,sans-serif]">
+        <p className="text-sm font-semibold text-white/70">Поддержка PSN HUB</p>
+        <p className="text-xs leading-5">
+          Возникли сложности со входом, доступом или работой платформы? Свяжитесь с нами.
+        </p>
+        <div className="flex items-center gap-2 text-sm">
+          <Phone size={14} />
+          <span>+7 708 491 4880</span>
         </div>
+        <p className="max-w-md text-[10px] leading-4 text-white/40">
+          Для регистрации технических ошибок и обращений вне рабочего времени используйте Helpdesk CRM.
+        </p>
       </div>
     </motion.div>
   );

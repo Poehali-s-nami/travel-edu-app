@@ -196,11 +196,14 @@ export function UserLogin() {
 
             {showHelp ? (
               <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4 text-left text-sm leading-6 text-slate-500 shadow-sm">
+                <p className="font-semibold text-slate-700">Поддержка PSN HUB</p>
                 <p className="mt-1">
-                  Обратитесь к администратору PSN HUB. Администратор назначит
-                  временный пароль. После входа вы создадите новый личный
-                  пароль. Контакты: psnkzeducation@gmail.com,
-                  +7 708 491 4880.
+                  Возникли сложности со входом, доступом или работой платформы?
+                  Свяжитесь с нами: +7 708 491 4880.
+                </p>
+                <p className="mt-2 text-xs leading-5 text-slate-400">
+                  Для регистрации технических ошибок и обращений вне рабочего
+                  времени используйте Helpdesk CRM.
                 </p>
               </div>
             ) : null}
