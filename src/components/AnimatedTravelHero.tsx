@@ -252,7 +252,7 @@ export default function AnimatedTravelHero() {
       </div>
 
       <div className="absolute bottom-10 z-20 flex flex-col items-center gap-2 text-sm font-light tracking-wide text-white/50 [font-family:'Lato',Arial,sans-serif]">
-        <p>Администратор системы: Лешина Анастасия</p>
+        <p>Администратор системы</p>
         <div className="flex items-center gap-6">
           <div className="flex items-center gap-2">
             <Phone size={14} />

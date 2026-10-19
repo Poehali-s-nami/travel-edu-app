@@ -197,9 +197,9 @@ export function UserLogin() {
             {showHelp ? (
               <div className="mt-4 rounded-xl border border-slate-200 bg-white p-4 text-left text-sm leading-6 text-slate-500 shadow-sm">
                 <p className="mt-1">
-                  Обратитесь к администратору PSN HUB: Лешиной Анастасии.
-                  Она назначит временный пароль. После входа вы создадите новый
-                  личный пароль. Контакты: psnkzeducation@gmail.com,
+                  Обратитесь к администратору PSN HUB. Администратор назначит
+                  временный пароль. После входа вы создадите новый личный
+                  пароль. Контакты: psnkzeducation@gmail.com,
                   +7 708 491 4880.
                 </p>
               </div>
