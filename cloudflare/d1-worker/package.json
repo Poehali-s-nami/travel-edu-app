@@ -1,0 +1,17 @@
+{
+  "name": "psn-hub-data-api",
+  "private": true,
+  "scripts": {
+    "check": "tsc --noEmit",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:migrate:local": "wrangler d1 migrations apply psn-hub-production --local",
+    "db:migrate:remote": "wrangler d1 migrations apply psn-hub-production --remote"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261019.1",
+    "typescript": "^5.6.3",
+    "wrangler": "^4.0.0"
+  }
+}
+
