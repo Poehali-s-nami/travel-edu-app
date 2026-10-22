@@ -4,8 +4,11 @@
 
 Этап 1 подготовлен в отдельной ветке. База `psn-hub-production` создана в Cloudflare D1,
 UUID `6cbaeaf0-368a-4a85-8cf7-09dab381ae47`; начальная схема из 10 таблиц применена и
-проверена. Данные Firestore ещё не копировались. Production продолжает использовать Firebase
-Authentication и Firestore, переключение пользовательского трафика на D1 не выполнялось.
+проверена. Тестовый Worker опубликован на `https://api.psnhub.kz`; его технический адрес
+`workers.dev` и preview-адреса отключены. Проверены открытый `/health`, запрет каталога без
+авторизации и запрет административного API без прав администратора. Данные Firestore ещё не
+копировались. Production продолжает использовать Firebase Authentication и Firestore,
+переключение пользовательского трафика на D1 не выполнялось.
 
 Firebase Authentication сохраняется и после переноса данных: хеши паролей нельзя безопасно
 перенести из Firebase. Пользователи продолжат входить с текущими логинами и паролями.
@@ -40,10 +43,12 @@ Firebase Authentication сохраняется и после переноса д
 2. Вставить выданный `database_id` в `cloudflare/d1-worker/wrangler.toml`.
 3. В каталоге `cloudflare/d1-worker` выполнить `npm ci`.
 4. Выполнить `npm run db:migrate:remote`.
-5. Добавить Worker secret `FIREBASE_SERVICE_ACCOUNT_JSON` командой
+5. Привязать тестовый Worker к `api.psnhub.kz`, оставив `workers_dev` и `preview_urls`
+   выключенными.
+6. Добавить Worker secret `FIREBASE_SERVICE_ACCOUNT_JSON` командой
    `npx wrangler secret put FIREBASE_SERVICE_ACCOUNT_JSON`.
-6. Выполнить `npm run deploy`.
-7. Проверить `/health`, затем запустить постраничное копирование каждой коллекции.
+7. Выполнить `npm run deploy`.
+8. Проверить `/health`, затем запустить постраничное копирование каждой коллекции.
 
 Для каждой коллекции первый запрос отправляется без `pageToken` и `runId`. Все следующие
 страницы обязаны использовать `runId` и `nextPageToken` из предыдущего ответа. Новый запуск
