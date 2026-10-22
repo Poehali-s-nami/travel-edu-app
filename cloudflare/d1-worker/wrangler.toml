@@ -9,8 +9,7 @@ enabled = true
 [[d1_databases]]
 binding = "DB"
 database_name = "psn-hub-production"
-# Replace this placeholder with the ID returned when the production D1 database is created.
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "6cbaeaf0-368a-4a85-8cf7-09dab381ae47"
 migrations_dir = "migrations"
 
 [vars]
