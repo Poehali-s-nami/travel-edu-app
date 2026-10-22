@@ -11,6 +11,7 @@
     "test:roles": "node --test scripts/test-training-roles.mjs",
     "test:import": "node --test scripts/test-shared-password-import.mjs",
     "test:password": "node --test scripts/test-password-change.mjs",
+    "test:login-status": "node --test scripts/test-login-status.mjs",
     "test:roles-admin": "node --test scripts/test-admin-training-role.mjs",
     "test:groups": "node --test scripts/test-training-groups.mjs",
     "test:content-access": "node --test scripts/test-content-access.mjs"

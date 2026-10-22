@@ -12,13 +12,15 @@ const ADMIN_EMAIL =
   process.env.NEXT_PUBLIC_ADMIN_EMAIL ?? "psnkzeducation@gmail.com";
 const FIREBASE_PROJECT_ID =
   process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID ?? "travel-edu-app";
-
-function normalizeLogin(login: string) {
-  return login.normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ");
-}
+const FIREBASE_API_KEY =
+  process.env.NEXT_PUBLIC_FIREBASE_API_KEY ??
+  "AIzaSyBvX9x2IFLzG5nf8akzWmzLuv7r442XiKY";
 
 function json(data: unknown, status = 200) {
-  return NextResponse.json(data, { status });
+  return NextResponse.json(data, {
+    status,
+    headers: { "cache-control": "no-store" }
+  });
 }
 
 function base64Url(input: ArrayBuffer | string) {
@@ -119,62 +121,65 @@ async function getAccessToken(serviceAccount: ServiceAccount) {
   return data.access_token;
 }
 
-async function findAccessUser(token: string, normalizedLogin: string) {
+async function verifyUser(idToken: string) {
   const response = await fetch(
-    `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents:runQuery`,
+    `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(FIREBASE_API_KEY)}`,
     {
       method: "POST",
-      headers: {
-        authorization: `Bearer ${token}`,
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({
-        structuredQuery: {
-          from: [{ collectionId: "accessUsers" }],
-          where: {
-            fieldFilter: {
-              field: { fieldPath: "normalizedLogin" },
-              op: "EQUAL",
-              value: { stringValue: normalizedLogin }
-            }
-          },
-          limit: 1
-        }
-      })
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ idToken })
     }
   );
 
+  if (!response.ok) return null;
+  const user = ((await response.json()) as {
+    users?: Array<{ localId?: string; email?: string; disabled?: boolean }>;
+  }).users?.[0];
+
+  return user?.localId && user.email && user.disabled !== true
+    ? { uid: user.localId, email: user.email.toLowerCase() }
+    : null;
+}
+
+async function findAccessUser(token: string, uid: string) {
+  const response = await fetch(
+    `https://firestore.googleapis.com/v1/projects/${FIREBASE_PROJECT_ID}/databases/(default)/documents/accessUsers/${encodeURIComponent(uid)}`,
+    {
+      headers: { authorization: `Bearer ${token}` }
+    }
+  );
+
+  if (response.status === 404) return null;
   if (!response.ok) {
     throw new Error(`Firestore lookup failed: ${await response.text()}`);
   }
 
-  const rows = (await response.json()) as Array<{
-    document?: {
-      fields?: {
-        active?: { booleanValue?: boolean };
-        archived?: { booleanValue?: boolean };
-        claimState?: { stringValue?: string };
-      };
+  return ((await response.json()) as {
+    fields?: {
+      active?: { booleanValue?: boolean };
+      archived?: { booleanValue?: boolean };
+      claimState?: { stringValue?: string };
     };
-  }>;
-  return rows.find((row) => row.document)?.document?.fields ?? null;
+  }).fields ?? null;
 }
 
 export async function POST(request: NextRequest) {
   try {
-    const body = (await request.json()) as { login?: string };
-    const normalizedLogin = normalizeLogin(body.login ?? "");
+    const authorization = request.headers.get("authorization") ?? "";
+    const idToken = authorization.startsWith("Bearer ")
+      ? authorization.slice(7).trim()
+      : "";
+    if (!idToken) return json({ status: "unauthorized" }, 401);
 
-    if (!normalizedLogin) {
-      return json({ status: "empty" });
-    }
+    const verifiedUser = await verifyUser(idToken);
+    if (!verifiedUser) return json({ status: "unauthorized" }, 401);
 
-    if (normalizedLogin === ADMIN_EMAIL.toLowerCase()) {
+    if (verifiedUser.email === ADMIN_EMAIL.toLowerCase()) {
       return json({ status: "admin" });
     }
 
     const token = await getAccessToken(getServiceAccount());
-    const accessUser = await findAccessUser(token, normalizedLogin);
+    const accessUser = await findAccessUser(token, verifiedUser.uid);
 
     if (!accessUser) {
       return json({ status: "not-found" });
@@ -199,6 +204,6 @@ export async function POST(request: NextRequest) {
     return json({ status: "active" });
   } catch (error) {
     console.error("Login status check failed", error);
-    return json({ status: "unknown" }, 200);
+    return json({ status: "unknown" }, 500);
   }
 }

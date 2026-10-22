@@ -3,12 +3,16 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS migration_runs (
   id TEXT PRIMARY KEY,
   source TEXT NOT NULL DEFAULT 'firestore',
+  collection_name TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
   started_at TEXT NOT NULL,
   completed_at TEXT,
   initiated_by TEXT NOT NULL,
   error_message TEXT
 );
+
+CREATE INDEX IF NOT EXISTS idx_migration_runs_collection_started
+  ON migration_runs(collection_name, started_at);
 
 -- Exact Firestore copy retained for rollback checks and lossless reprocessing.
 CREATE TABLE IF NOT EXISTS firestore_documents (

@@ -305,6 +305,45 @@ async function savePage(env: Env, collection: string, documents: FirestoreDocume
   }
 }
 
+function cleanupStatements(env: Env, collection: string, runId: string) {
+  const statements = [
+    env.DB.prepare(`DELETE FROM firestore_documents
+      WHERE collection_name = ? AND migration_run_id != ?`).bind(collection, runId)
+  ];
+
+  const normalizedTables: Record<string, string> = {
+    accessUsers: "access_users",
+    materials: "materials",
+    tracks: "tracks",
+    trainingGroups: "training_groups",
+    learningProgress: "learning_progress",
+    materialViews: "material_views"
+  };
+  const table = normalizedTables[collection];
+  if (table) {
+    statements.push(env.DB.prepare(`DELETE FROM ${table}
+      WHERE id NOT IN (
+        SELECT document_id FROM firestore_documents WHERE collection_name = ?
+      )`).bind(collection));
+  } else if (["loginEvents", "adminImpersonations", "importHistory"].includes(collection)) {
+    statements.push(env.DB.prepare(`DELETE FROM audit_events
+      WHERE event_type = ? AND id NOT IN (
+        SELECT collection_name || ':' || document_id
+        FROM firestore_documents WHERE collection_name = ?
+      )`).bind(collection, collection));
+  } else {
+    statements.push(env.DB.prepare(`DELETE FROM reference_documents
+      WHERE collection_name = ? AND id NOT IN (
+        SELECT document_id FROM firestore_documents WHERE collection_name = ?
+      )`).bind(collection, collection));
+  }
+
+  statements.push(env.DB.prepare(`UPDATE migration_runs
+    SET status = 'completed', completed_at = ?, error_message = NULL WHERE id = ?`)
+    .bind(new Date().toISOString(), runId));
+  return statements;
+}
+
 async function migratePage(request: Request, env: Env, headers: HeadersInit) {
   const admin = await verifyAdmin(request, env);
   if (!admin?.email) return json({ message: "Нет прав администратора." }, 403, headers);
@@ -320,15 +359,39 @@ async function migratePage(request: Request, env: Env, headers: HeadersInit) {
   }
   const pageSize = Math.max(1, Math.min(100, Number(body.pageSize) || 100));
   const runId = body.runId || crypto.randomUUID();
-  await env.DB.prepare(`INSERT OR IGNORE INTO migration_runs
-    (id, status, started_at, initiated_by) VALUES (?, 'running', ?, ?)`)
-    .bind(runId, new Date().toISOString(), admin.email.toLowerCase()).run();
+  const existingRun = await env.DB.prepare(`SELECT collection_name, status
+    FROM migration_runs WHERE id = ?`).bind(runId).first<{
+      collection_name: string;
+      status: "running" | "completed" | "failed";
+    }>();
+  if (existingRun && existingRun.collection_name !== collection) {
+    return json({ message: "Запуск миграции относится к другой коллекции." }, 409, headers);
+  }
+  if (body.pageToken && !existingRun) {
+    return json({ message: "Продолжение миграции не найдено. Начните коллекцию заново." }, 409, headers);
+  }
+  if (existingRun?.status === "completed") {
+    return json({ message: "Эта миграция уже завершена." }, 409, headers);
+  }
+  if (!existingRun) {
+    await env.DB.prepare(`INSERT INTO migration_runs
+      (id, collection_name, status, started_at, initiated_by)
+      VALUES (?, ?, 'running', ?, ?)`)
+      .bind(runId, collection, new Date().toISOString(), admin.email.toLowerCase()).run();
+  } else if (existingRun.status === "failed") {
+    await env.DB.prepare(`UPDATE migration_runs
+      SET status = 'running', completed_at = NULL, error_message = NULL WHERE id = ?`)
+      .bind(runId).run();
+  }
 
   try {
     const token = await firestoreToken(env);
     const page = await readFirestorePage(env, token, collection, body.pageToken ?? "", pageSize);
     const documents = page.documents ?? [];
     await savePage(env, collection, documents, runId);
+    if (!page.nextPageToken) {
+      await env.DB.batch(cleanupStatements(env, collection, runId));
+    }
     return json({
       runId,
       collection,

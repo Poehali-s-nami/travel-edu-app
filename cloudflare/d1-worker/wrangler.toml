@@ -17,5 +17,5 @@ migrations_dir = "migrations"
 FIREBASE_PROJECT_ID = "travel-edu-app"
 FIREBASE_API_KEY = "AIzaSyBvX9x2IFLzG5nf8akzWmzLuv7r442XiKY"
 ADMIN_EMAIL = "psnkzeducation@gmail.com"
-ALLOWED_ORIGINS = "https://psnhub.kz,https://www.psnhub.kz,https://psn-hub.pages.dev"
+ALLOWED_ORIGINS = "https://psnhub.kz,https://www.psnhub.kz,https://psn-hub.pages.dev,https://psn-hub-next.pages.dev"
 
