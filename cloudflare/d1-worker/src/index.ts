@@ -52,7 +52,14 @@ function json(data: unknown, status = 200, headers: HeadersInit = {}) {
 function corsHeaders(request: Request, env: Env): Record<string, string> {
   const origin = request.headers.get("origin") ?? "";
   const allowed = env.ALLOWED_ORIGINS.split(",").map((item) => item.trim());
-  if (!allowed.includes(origin)) return {};
+  let isPreview = false;
+  try {
+    const url = new URL(origin);
+    isPreview = url.protocol === "https:" && url.hostname.endsWith(".psn-hub-next.pages.dev");
+  } catch {
+    // Missing and malformed origins stay disallowed.
+  }
+  if (!allowed.includes(origin) && !isPreview) return {};
   return { "access-control-allow-origin": origin, vary: "Origin" };
 }
 
