@@ -13,6 +13,12 @@ Firestore в D1. Все 11 запусков завершены со статус
 Production продолжает использовать Firebase Authentication и Firestore, переключение
 пользовательского трафика на D1 не выполнялось.
 
+В тестовом Pages-проекте `psn-hub-next` для окружения Preview задана переменная
+`NEXT_PUBLIC_CONTENT_API_URL=https://api.psnhub.kz/v1/catalog`. Ветка
+`codex/d1-migration-phase-1` сначала читает каталог из D1, проверяет структуру ответа и при
+ошибке или таймауте через 4 секунды возвращается к действующему `/api/content` на Firestore.
+Production-окружение этой переменной не содержит.
+
 Сверенные количества документов:
 
 - `accessUsers`: 1 589;
