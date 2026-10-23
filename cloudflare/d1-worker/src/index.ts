@@ -42,6 +42,8 @@ const MIGRATED_COLLECTIONS = [
   "importHistory"
 ] as const;
 
+let firestoreTokenCache: { token: string; expiresAt: number } | null = null;
+
 function json(data: unknown, status = 200, headers: HeadersInit = {}) {
   return new Response(JSON.stringify(data), {
     status,
@@ -162,6 +164,9 @@ async function verifyAdmin(request: Request, env: Env) {
 }
 
 async function firestoreToken(env: Env) {
+  if (firestoreTokenCache && firestoreTokenCache.expiresAt > Date.now() + 60_000) {
+    return firestoreTokenCache.token;
+  }
   const raw = env.FIREBASE_SERVICE_ACCOUNT_JSON ?? "";
   if (!raw) throw new Error("FIREBASE_SERVICE_ACCOUNT_JSON is not configured");
   const account = JSON.parse(raw.trim().startsWith("{") ? raw : atob(raw)) as {
@@ -196,7 +201,23 @@ async function firestoreToken(env: Env) {
     })
   });
   if (!response.ok) throw new Error(`Firebase service authentication failed: ${response.status}`);
-  return ((await response.json()) as { access_token: string }).access_token;
+  const result = (await response.json()) as { access_token: string; expires_in?: number };
+  firestoreTokenCache = {
+    token: result.access_token,
+    expiresAt: Date.now() + Math.max(60, result.expires_in ?? 3600) * 1000
+  };
+  return result.access_token;
+}
+
+async function readFirestoreDocument(env: Env, token: string, collection: string, id: string) {
+  const response = await fetch(
+    `https://firestore.googleapis.com/v1/projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents/` +
+      `${encodeURIComponent(collection)}/${encodeURIComponent(id)}`,
+    { headers: { authorization: `Bearer ${token}` } }
+  );
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`Firestore get failed for ${collection}: ${response.status}`);
+  return (await response.json()) as FirestoreDocument;
 }
 
 async function readFirestorePage(env: Env, token: string, collection: string, pageToken: string, pageSize: number) {
@@ -427,21 +448,12 @@ async function catalog(request: Request, env: Env, headers: HeadersInit) {
     return json({ message: "Требуется вход." }, 401, headers);
   }
   const isAdmin = authUser.email?.toLowerCase() === env.ADMIN_EMAIL.toLowerCase();
-  const profile = isAdmin
+  const profileDocument = isAdmin
     ? null
-    : await env.DB.prepare(`SELECT training_role, active, archived, claim_state,
-        password_reset_requested, office_ids_json, group_ids_json
-      FROM access_users WHERE id = ?`).bind(authUser.localId).first<{
-        training_role: string | null;
-        active: number;
-        archived: number;
-        claim_state: string | null;
-        password_reset_requested: number;
-        office_ids_json: string;
-        group_ids_json: string;
-      }>();
-  if (!isAdmin && (!profile || profile.active !== 1 || profile.archived === 1 ||
-      profile.password_reset_requested === 1 || (profile.claim_state ?? "claimed") !== "claimed")) {
+    : await readFirestoreDocument(env, await firestoreToken(env), "accessUsers", authUser.localId);
+  const profile = profileDocument ? decodeFields(profileDocument.fields) : null;
+  if (!isAdmin && (!profile || profile.active !== true || profile.archived === true ||
+      profile.passwordResetRequested === true || (profile.claimState ?? "claimed") !== "claimed")) {
     return json({ message: "Нет доступа." }, 403, headers);
   }
 
@@ -452,9 +464,9 @@ async function catalog(request: Request, env: Env, headers: HeadersInit) {
   ]);
   const activeGroupIds = new Set(groupRows.results.filter((row) => row.archived !== 1).map((row) => row.id));
   const user = {
-    trainingRole: profile?.training_role ?? "",
-    officeIds: profile ? stringList(JSON.parse(profile.office_ids_json)) : [],
-    groupIds: profile ? stringList(JSON.parse(profile.group_ids_json)) : []
+    trainingRole: text(profile?.trainingRole),
+    officeIds: stringList(profile?.officeIds),
+    groupIds: stringList(profile?.groupIds)
   };
   const visible = (item: Record<string, unknown>) => isAdmin ||
     (item.archived !== true && canAccessContent(item.audience, user, activeGroupIds));
