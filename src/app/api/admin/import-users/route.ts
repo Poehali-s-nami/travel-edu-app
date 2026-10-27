@@ -871,7 +871,8 @@ export async function POST(request: NextRequest) {
       rotatedPasswords,
       conflicts,
       archivedWithoutLogin,
-      archiveMissing: Boolean(body.archiveMissing)
+      archiveMissing: Boolean(body.archiveMissing),
+      updatedGroupIds: Array.from(processedOfficeGroups, officeGroupId)
     });
   } catch (error) {
     for (const uid of pendingAuthIds) {

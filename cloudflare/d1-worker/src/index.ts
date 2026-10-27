@@ -42,6 +42,9 @@ const MIGRATED_COLLECTIONS = [
   "importHistory"
 ] as const;
 
+const LIVE_SYNC_COLLECTIONS = ["materials", "tracks", "trainingGroups"] as const;
+type LiveSyncCollection = (typeof LIVE_SYNC_COLLECTIONS)[number];
+
 let firestoreTokenCache: { token: string; expiresAt: number } | null = null;
 
 function json(data: unknown, status = 200, headers: HeadersInit = {}) {
@@ -333,6 +336,71 @@ async function savePage(env: Env, collection: string, documents: FirestoreDocume
   }
 }
 
+function deleteDocumentStatements(env: Env, collection: LiveSyncCollection, id: string) {
+  const normalizedTables: Record<LiveSyncCollection, string> = {
+    materials: "materials",
+    tracks: "tracks",
+    trainingGroups: "training_groups"
+  };
+  return [
+    env.DB.prepare("DELETE FROM firestore_documents WHERE collection_name = ? AND document_id = ?")
+      .bind(collection, id),
+    env.DB.prepare(`DELETE FROM ${normalizedTables[collection]} WHERE id = ?`).bind(id)
+  ];
+}
+
+async function syncDocuments(request: Request, env: Env, headers: HeadersInit) {
+  const admin = await verifyAdmin(request, env);
+  if (!admin?.email) return json({ message: "Нет прав администратора." }, 403, headers);
+  const body = (await request.json()) as { documents?: Array<{ collection?: unknown; id?: unknown }> };
+  if (!Array.isArray(body.documents) || body.documents.length < 1 || body.documents.length > 100) {
+    return json({ message: "Передайте от 1 до 100 документов." }, 400, headers);
+  }
+
+  const seen = new Set<string>();
+  const documents: Array<{ collection: LiveSyncCollection; id: string }> = [];
+  for (const item of body.documents) {
+    const collection = typeof item.collection === "string" ? item.collection : "";
+    const id = typeof item.id === "string" ? item.id.trim() : "";
+    if (!LIVE_SYNC_COLLECTIONS.includes(collection as LiveSyncCollection) ||
+        !id || id.length > 512 || id.includes("/")) {
+      return json({ message: "Недопустимая ссылка на документ." }, 400, headers);
+    }
+    const key = `${collection}:${id}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      documents.push({ collection: collection as LiveSyncCollection, id });
+    }
+  }
+
+  const token = await firestoreToken(env);
+  const results: Array<{ collection: LiveSyncCollection; id: string; action: "upserted" | "deleted" }> = [];
+  for (const item of documents) {
+    const source = await readFirestoreDocument(env, token, item.collection, item.id);
+    if (!source) {
+      await env.DB.batch(deleteDocumentStatements(env, item.collection, item.id));
+      results.push({ ...item, action: "deleted" });
+      continue;
+    }
+    const runId = `live-sync:${item.collection}`;
+    const now = new Date().toISOString();
+    await env.DB.prepare(`INSERT INTO migration_runs
+      (id, collection_name, status, started_at, completed_at, initiated_by)
+      VALUES (?, ?, 'completed', ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET completed_at=excluded.completed_at, initiated_by=excluded.initiated_by`)
+      .bind(runId, item.collection, now, now, admin.email.toLowerCase()).run();
+    await savePage(env, item.collection, [source], runId);
+    results.push({ ...item, action: "upserted" });
+  }
+
+  const now = new Date().toISOString();
+  await env.DB.prepare(`INSERT INTO audit_events (id, event_type, actor_id, created_at, data_json)
+    VALUES (?, 'd1LiveSync', ?, ?, ?)`)
+    .bind(`d1LiveSync:${crypto.randomUUID()}`, admin.email.toLowerCase(), now,
+      JSON.stringify({ documents: results })).run();
+  return json({ synced: results.length, results }, 200, headers);
+}
+
 function cleanupStatements(env: Env, collection: string, runId: string) {
   const statements = [
     env.DB.prepare(`DELETE FROM firestore_documents
@@ -506,6 +574,9 @@ export default {
       }
       if (request.method === "GET" && url.pathname === "/v1/catalog") {
         return await catalog(request, env, headers);
+      }
+      if (request.method === "POST" && url.pathname === "/admin/sync-documents") {
+        return await syncDocuments(request, env, headers);
       }
       if (request.method === "POST" && url.pathname === "/admin/migrate-page") {
         return await migratePage(request, env, headers);

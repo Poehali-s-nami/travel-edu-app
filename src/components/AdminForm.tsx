@@ -63,6 +63,7 @@ import { TrackPreview } from "@/components/TrackPreview";
 import { TrackMaterialPicker } from "@/components/TrackMaterialPicker";
 import { TrainingGroupsWorkspace } from "@/components/TrainingGroupsWorkspace";
 import { AUDIENCE_ROLES } from "@/lib/content-access";
+import { syncD1Documents } from "@/lib/d1-admin-sync";
 import { UnsavedEditorProvider, useEditorDraft, useEditorNavigation } from "@/components/UnsavedEditor";
 import type {
   ContentTab,
@@ -162,6 +163,7 @@ type ImportBatchResult = {
   rotatedPasswords?: number;
   archivedWithoutLogin?: number;
   conflicts?: ImportConflict[];
+  updatedGroupIds?: string[];
 };
 
 type ImportTotals = {
@@ -778,7 +780,8 @@ function AdminWorkspace({
 
     try {
       const batch = writeBatch(db);
-      batch.set(doc(collection(db, "materials")), {
+      const materialRef = doc(collection(db, "materials"));
+      batch.set(materialRef, {
         audience: materialForm.audience,
         title: materialForm.title.trim(),
         hiddenFromLibrary: materialForm.hiddenFromLibrary,
@@ -805,12 +808,19 @@ function AdminWorkspace({
       markCatalogChanged(batch, db);
       await batch.commit();
 
+      try {
+        await syncD1Documents(user, [{ collection: "materials", id: materialRef.id }]);
+        setMessage("Материал добавлен.");
+      } catch (error) {
+        console.warn("D1 material synchronization failed:", error);
+        setMessage("Материал добавлен в Firestore, но D1 не обновился. Повторите сохранение перед публикацией.");
+      }
+
       setMaterialForm({
         ...initialMaterialForm,
         type: tab === "webinars" ? "video" : "file",
         format: tab === "webinars" ? "Вебинар" : "PDF"
       });
-      setMessage("Материал добавлен.");
       return true;
     } catch {
       setMessage("Не удалось сохранить материал. Проверьте права Firestore.");
@@ -832,7 +842,8 @@ function AdminWorkspace({
 
     try {
       const batch = writeBatch(db);
-      batch.set(doc(collection(db, "tracks")), {
+      const trackRef = doc(collection(db, "tracks"));
+      batch.set(trackRef, {
         audience: trackForm.audience,
         title: trackForm.title.trim(),
         description: trackForm.description.trim(),
@@ -847,9 +858,16 @@ function AdminWorkspace({
       markCatalogChanged(batch, db);
       await batch.commit();
 
+      try {
+        await syncD1Documents(user, [{ collection: "tracks", id: trackRef.id }]);
+        setMessage("Обучающий трек добавлен.");
+      } catch (error) {
+        console.warn("D1 track synchronization failed:", error);
+        setMessage("Трек добавлен в Firestore, но D1 не обновился. Повторите сохранение перед публикацией.");
+      }
+
       setTrackForm(initialTrackForm);
       setTrackMaterialIds([]);
-      setMessage("Обучающий трек добавлен.");
       return true;
     } catch {
       setMessage("Не удалось сохранить трек. Проверьте права Firestore.");
@@ -909,8 +927,13 @@ function AdminWorkspace({
 
       markCatalogChanged(batch, db);
       await batch.commit();
-
-      setMessage("Материал обновлен.");
+      try {
+        await syncD1Documents(user, [{ collection: "materials", id }]);
+        setMessage("Материал обновлен.");
+      } catch (error) {
+        console.warn("D1 material synchronization failed:", error);
+        setMessage("Материал обновлен в Firestore, но D1 не обновился. Повторите сохранение перед публикацией.");
+      }
       return true;
     } catch (error) {
       console.error("Failed to update material:", error);
@@ -954,8 +977,13 @@ function AdminWorkspace({
 
       markCatalogChanged(batch, db);
       await batch.commit();
-
-      setMessage("Трек обновлен.");
+      try {
+        await syncD1Documents(user, [{ collection: "tracks", id }]);
+        setMessage("Трек обновлен.");
+      } catch (error) {
+        console.warn("D1 track synchronization failed:", error);
+        setMessage("Трек обновлен в Firestore, но D1 не обновился. Повторите сохранение перед публикацией.");
+      }
       return true;
     } catch (error) {
       console.error("Failed to update track:", error);
@@ -973,7 +1001,13 @@ function AdminWorkspace({
     batch.delete(doc(db, collectionName, id));
     markCatalogChanged(batch, db);
     await batch.commit();
-    setMessage("Запись удалена.");
+    try {
+      await syncD1Documents(user, [{ collection: collectionName, id }]);
+      setMessage("Запись удалена.");
+    } catch (error) {
+      console.warn("D1 deletion synchronization failed:", error);
+      setMessage("Запись удалена из Firestore, но осталась в D1. Не переключайте production до повторной синхронизации.");
+    }
   }
 
   async function updateAccessUser(
@@ -1196,6 +1230,7 @@ function AdminWorkspace({
     try {
       const result: ImportTotals = checkpoint?.result ?? initialResult;
       const conflicts: ImportConflict[] = checkpoint?.conflicts ?? [];
+      let d1SyncWarning = false;
 
       for (let batchIndex = startBatchIndex; batchIndex < batches.length; batchIndex += 1) {
         const batch = batches[batchIndex];
@@ -1297,6 +1332,18 @@ function AdminWorkspace({
             );
           }
 
+          if (batchResult.updatedGroupIds?.length) {
+            try {
+              await syncD1Documents(user, batchResult.updatedGroupIds.map((id) => ({
+                collection: "trainingGroups" as const,
+                id
+              })));
+            } catch (error) {
+              d1SyncWarning = true;
+              console.warn("D1 office group synchronization failed:", error);
+            }
+          }
+
           result.created += batchResult.created ?? 0;
           result.updated += batchResult.updated ?? 0;
           result.skipped += batchResult.skipped ?? 0;
@@ -1320,7 +1367,9 @@ function AdminWorkspace({
       setMessage(
         `Импорт завершен. Импортировано: ${result.imported ?? 0}, создано: ${
           result.created ?? 0
-        }, обновлено: ${result.updated ?? 0}, временных паролей заменено: ${result.rotatedPasswords}, архивировано по ID без логина: ${result.archivedWithoutLogin}, пропущено: ${result.skipped ?? 0}. Конфликтных аккаунтов для ручной проверки: ${conflicts.length}.`
+        }, обновлено: ${result.updated ?? 0}, временных паролей заменено: ${result.rotatedPasswords}, архивировано по ID без логина: ${result.archivedWithoutLogin}, пропущено: ${result.skipped ?? 0}. Конфликтных аккаунтов для ручной проверки: ${conflicts.length}.${
+          d1SyncWarning ? " Некоторые офисные группы не синхронизированы с D1; повторите импорт перед переключением production." : ""
+        }`
       );
       setImportTemporaryPassword("");
       try {

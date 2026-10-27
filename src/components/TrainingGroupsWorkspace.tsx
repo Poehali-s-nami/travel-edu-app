@@ -4,6 +4,7 @@ import { FormEvent, useState } from "react";
 import { addDoc, collection, doc, serverTimestamp, setDoc, updateDoc } from "firebase/firestore";
 import { Archive, FolderPlus, Search, Users } from "lucide-react";
 import { auth, db, ADMIN_EMAIL } from "@/lib/firebase";
+import { syncD1Documents } from "@/lib/d1-admin-sync";
 import { belongsToGroup, officeGroupId } from "@/lib/training-groups";
 import type { AccessUser } from "@/types/access-user";
 import type { Material, LearningTrack } from "@/types/material";
@@ -38,8 +39,15 @@ export function TrainingGroupsWorkspace({ groups, users, materials, tracks }: {
       });
       setName("");
       setSelectedId(created.id);
-      setMessage("Группа создана.");
-    } catch {
+      try {
+        await syncD1Documents(auth.currentUser, [{ collection: "trainingGroups", id: created.id }]);
+        setMessage("Группа создана.");
+      } catch (error) {
+        console.warn("D1 group synchronization failed:", error);
+        setMessage("Группа создана в Firestore, но D1 не обновился. Повторите сохранение перед публикацией.");
+      }
+    } catch (error) {
+      console.warn("Group creation failed:", error);
       setMessage("Не удалось создать группу. Проверьте правила Firestore.");
     } finally {
       setSaving(false);
@@ -65,8 +73,18 @@ export function TrainingGroupsWorkspace({ groups, users, materials, tracks }: {
           name: officeName, kind: "office", officeId: id, updatedAt: serverTimestamp()
         }, { merge: true });
       }
-      setMessage(`Группы офисов обновлены: ${offices.size}. Назначения сохранены.`);
-    } catch {
+      try {
+        await syncD1Documents(auth.currentUser, Array.from(offices.keys(), (id) => ({
+          collection: "trainingGroups" as const,
+          id: officeGroupId(id)
+        })));
+        setMessage(`Группы офисов обновлены: ${offices.size}. Назначения сохранены.`);
+      } catch (error) {
+        console.warn("D1 office group synchronization failed:", error);
+        setMessage(`Группы офисов сохранены в Firestore: ${offices.size}, но D1 обновился не полностью. Повторный запуск безопасен.`);
+      }
+    } catch (error) {
+      console.warn("Office group creation failed:", error);
       setMessage("Не удалось сформировать все офисные группы. Повторный запуск безопасен.");
     } finally {
       setSaving(false);
@@ -131,8 +149,15 @@ function GroupEditor({ group, users, materials, tracks }: {
         ...(group.kind === "manual" ? { name: name.trim() } : {}),
         trackIds, materialIds, updatedAt: serverTimestamp()
       });
-      setMessage("Назначения сохранены.");
-    } catch {
+      try {
+        await syncD1Documents(auth.currentUser, [{ collection: "trainingGroups", id: group.id }]);
+        setMessage("Назначения сохранены.");
+      } catch (error) {
+        console.warn("D1 group synchronization failed:", error);
+        setMessage("Назначения сохранены в Firestore, но D1 не обновился. Повторите сохранение перед публикацией.");
+      }
+    } catch (error) {
+      console.warn("Group update failed:", error);
       setMessage("Не удалось сохранить группу.");
     } finally {
       setSaving(false);
@@ -159,8 +184,15 @@ function GroupEditor({ group, users, materials, tracks }: {
     setSaving(true);
     try {
       await updateDoc(doc(db, "trainingGroups", group.id), { archived: !group.archived, updatedAt: serverTimestamp() });
-      setMessage(group.archived ? "Группа восстановлена." : "Группа архивирована. Назначения больше не показываются сотрудникам.");
-    } catch {
+      try {
+        await syncD1Documents(auth.currentUser, [{ collection: "trainingGroups", id: group.id }]);
+        setMessage(group.archived ? "Группа восстановлена." : "Группа архивирована. Назначения больше не показываются сотрудникам.");
+      } catch (error) {
+        console.warn("D1 group synchronization failed:", error);
+        setMessage("Статус группы изменён в Firestore, но D1 не обновился. Повторите действие перед публикацией.");
+      }
+    } catch (error) {
+      console.warn("Group archive failed:", error);
       setMessage("Не удалось изменить статус группы.");
     } finally {
       setSaving(false);
