@@ -8,10 +8,13 @@ UUID `6cbaeaf0-368a-4a85-8cf7-09dab381ae47`; начальная схема из 
 `workers.dev` и preview-адреса отключены. Проверены открытый `/health`, запрет каталога без
 авторизации и запрет административного API без прав администратора.
 
-23 октября 2026 года выполнено полное контрольное копирование поддерживаемых коллекций
-Firestore в D1. Все 11 запусков завершены со статусом `completed`, запусков с ошибками нет.
-Production продолжает использовать Firebase Authentication и Firestore, переключение
-пользовательского трафика на D1 не выполнялось.
+27 октября 2026 года после полного CRM-импорта выполнена повторная контролируемая
+синхронизация всех семи коллекций с расхождениями. Повторная сверка через
+`GET /admin/reconciliation` подтвердила совпадение количества документов во всех 11
+поддерживаемых коллекциях. В `migration_runs` находятся 21 завершенный запуск со статусом
+`completed`; незавершенных и ошибочных запусков нет. Production продолжает использовать
+Firebase Authentication и Firestore, переключение пользовательского трафика на D1 не
+выполнялось.
 
 В тестовом Pages-проекте `psn-hub-next` для окружения Preview задана переменная
 `NEXT_PUBLIC_CONTENT_API_URL=https://api.psnhub.kz/v1/catalog`. Ветка
@@ -21,21 +24,21 @@ Production-окружение этой переменной не содержи�
 
 Сверенные количества документов:
 
-- `accessUsers`: 1 589;
-- `materials`: 52;
+- `accessUsers`: 1 611;
+- `materials`: 53;
 - `tracks`: 2;
-- `trainingGroups`: 532;
-- `learningProgress`: 496;
-- `materialViews`: 510;
-- `loginEvents`: 381;
-- `importHistory`: 2;
+- `trainingGroups`: 534;
+- `learningProgress`: 501;
+- `materialViews`: 564;
+- `loginEvents`: 415;
+- `importHistory`: 3;
 - `videoCategories`: 1;
 - `adminImpersonations`: 0;
-- `catalogMeta`: 0.
+- `catalogMeta`: 1.
 
-Нормализованные таблицы содержат те же количества; в `audit_events` находится 383 записи
-(381 событие входа и 2 записи истории импорта). Временный `MIGRATION_TOKEN` удалён из
-Cloudflare и из локальной файловой системы, а временная ветка авторизации удалена из Worker.
+Нормализованные таблицы содержат те же количества; в `audit_events` находится 421 запись,
+а в `reference_documents` — 2 записи. Временный `MIGRATION_TOKEN` удалён из Cloudflare и из
+локальной файловой системы, а временная ветка авторизации удалена из Worker.
 Сервисный аккаунт `psn-hub-d1-reader@travel-edu-app.iam.gserviceaccount.com` имеет только роль
 `Cloud Datastore Viewer`; его ключ хранится как зашифрованный секрет Worker для контрольной
 синхронизации перед будущим переключением.
