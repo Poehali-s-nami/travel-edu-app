@@ -2299,6 +2299,8 @@ type D1ReconciliationItem = {
 
 function D1ReconciliationPanel() {
   const [checking, setChecking] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [syncProgress, setSyncProgress] = useState("");
   const [checkedAt, setCheckedAt] = useState("");
   const [items, setItems] = useState<D1ReconciliationItem[]>([]);
   const [error, setError] = useState("");
@@ -2324,6 +2326,7 @@ function D1ReconciliationPanel() {
       if (!response.ok || !body.collections) throw new Error(body.message || "Сверка не выполнена.");
       setItems(body.collections);
       setCheckedAt(body.checkedAt ?? new Date().toISOString());
+      return body.collections;
     } catch (checkError) {
       setError(checkError instanceof Error ? checkError.message : "Сверка не выполнена.");
     } finally {
@@ -2333,6 +2336,53 @@ function D1ReconciliationPanel() {
 
   const mismatches = items.filter((item) => !item.matches);
 
+  const syncMismatches = async () => {
+    if (!auth?.currentUser || !apiBase || !mismatches.length) return;
+    setSyncing(true);
+    setError("");
+    try {
+      const token = await getIdToken(auth.currentUser);
+      for (let collectionIndex = 0; collectionIndex < mismatches.length; collectionIndex += 1) {
+        const collection = mismatches[collectionIndex].collection;
+        let pageToken = "";
+        let runId = "";
+        let page = 0;
+        do {
+          page += 1;
+          setSyncProgress(`${collectionIndex + 1} из ${mismatches.length}: ${collection}, страница ${page}`);
+          let response: Response | null = null;
+          for (let attempt = 1; attempt <= 3; attempt += 1) {
+            response = await fetch(`${apiBase}/admin/migrate-page`, {
+              method: "POST",
+              headers: {
+                authorization: `Bearer ${token}`,
+                "content-type": "application/json"
+              },
+              body: JSON.stringify({ collection, pageSize: 100, pageToken, runId })
+            });
+            if (response.ok || response.status < 500) break;
+            await new Promise((resolve) => window.setTimeout(resolve, attempt * 1000));
+          }
+          const body = await response?.json() as {
+            runId?: string;
+            nextPageToken?: string | null;
+            message?: string;
+          } | undefined;
+          if (!response?.ok || !body?.runId) throw new Error(body?.message || `Не удалось синхронизировать ${collection}.`);
+          runId = body.runId;
+          pageToken = body.nextPageToken ?? "";
+        } while (pageToken);
+      }
+      setSyncProgress("Синхронизация завершена. Проверяем результат...");
+      await check();
+    } catch (syncError) {
+      setError(syncError instanceof Error ? syncError.message : "Синхронизация не выполнена.");
+    } finally {
+      setSyncing(false);
+      setSyncProgress("");
+    }
+  };
+
   return (
     <section className="border-b border-slate-200 pb-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -2340,13 +2390,23 @@ function D1ReconciliationPanel() {
           <h3 className="text-base font-semibold text-slate-950">Сверка Firestore и D1</h3>
           <p className="mt-1 text-sm text-slate-500">Проверяет только количество документов и ничего не изменяет.</p>
         </div>
-        <button type="button" onClick={check} disabled={checking || !apiBase}
-          className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-800 hover:border-[#ea6a00] disabled:cursor-not-allowed disabled:opacity-50">
-          <RefreshCw className={`h-4 w-4 ${checking ? "animate-spin" : ""}`} />
-          {checking ? "Проверяем..." : "Проверить"}
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" onClick={check} disabled={checking || syncing || !apiBase}
+            className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-800 hover:border-[#ea6a00] disabled:cursor-not-allowed disabled:opacity-50">
+            <RefreshCw className={`h-4 w-4 ${checking ? "animate-spin" : ""}`} />
+            {checking ? "Проверяем..." : "Проверить"}
+          </button>
+          {mismatches.length ? (
+            <button type="button" onClick={syncMismatches} disabled={checking || syncing}
+              className="inline-flex items-center gap-2 rounded-lg bg-[#ea6a00] px-3 py-2 text-sm font-semibold text-white hover:bg-[#d45f00] disabled:cursor-not-allowed disabled:opacity-50">
+              <RefreshCw className={`h-4 w-4 ${syncing ? "animate-spin" : ""}`} />
+              {syncing ? "Синхронизируем..." : `Синхронизировать (${mismatches.length})`}
+            </button>
+          ) : null}
+        </div>
       </div>
       {error ? <p className="mt-3 text-sm font-medium text-red-700">{error}</p> : null}
+      {syncProgress ? <p className="mt-3 text-sm font-medium text-slate-700">{syncProgress}</p> : null}
       {items.length ? (
         <div className="mt-4 overflow-x-auto">
           <p className={`mb-3 text-sm font-medium ${mismatches.length ? "text-amber-700" : "text-emerald-700"}`}>
