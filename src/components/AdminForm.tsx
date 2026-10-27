@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   createUserWithEmailAndPassword,
+  getIdToken,
   signInWithEmailAndPassword,
   signInWithCustomToken,
   signInWithRedirect,
@@ -2231,7 +2232,7 @@ function CrmImportPanel({
           ) : null}
 
           <label className="block max-w-md text-sm font-medium text-slate-800">
-            Общий временный пароль для новых пользователей
+            Общий временный пароль для новых пользователей и CRM-аккаунтов без личного пароля
             <input
               type="password"
               value={temporaryPassword}
@@ -2244,7 +2245,8 @@ function CrmImportPanel({
               className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-slate-950 outline-none focus:border-[#ea6a00]"
             />
             <span className="mt-1 block text-xs font-normal text-slate-500">
-              Пароль не сохраняется в истории импорта. Действующие пароли не изменятся.
+              Пароль не сохраняется в истории импорта. Личные пароли, пароли после точечного
+              сброса администратором и пароли вручную созданных аккаунтов не изменятся.
             </span>
           </label>
 
@@ -2284,6 +2286,95 @@ function ImportStat({ label, value }: { label: string; value: number }) {
       <p className="text-xs font-medium text-slate-500">{label}</p>
       <p className="mt-1 text-xl font-semibold text-slate-950">{value}</p>
     </div>
+  );
+}
+
+type D1ReconciliationItem = {
+  collection: string;
+  firestore: number;
+  d1: number;
+  difference: number;
+  matches: boolean;
+};
+
+function D1ReconciliationPanel() {
+  const [checking, setChecking] = useState(false);
+  const [checkedAt, setCheckedAt] = useState("");
+  const [items, setItems] = useState<D1ReconciliationItem[]>([]);
+  const [error, setError] = useState("");
+  const apiBase = (process.env.NEXT_PUBLIC_CONTENT_API_URL ?? "").replace(/\/v1\/catalog\/?$/, "");
+
+  const check = async () => {
+    if (!auth?.currentUser || !apiBase) {
+      setError("Проверка D1 доступна только на тестовом стенде с подключённым API.");
+      return;
+    }
+    setChecking(true);
+    setError("");
+    try {
+      const token = await getIdToken(auth.currentUser);
+      const response = await fetch(`${apiBase}/admin/reconciliation`, {
+        headers: { authorization: `Bearer ${token}` }
+      });
+      const body = await response.json() as {
+        checkedAt?: string;
+        collections?: D1ReconciliationItem[];
+        message?: string;
+      };
+      if (!response.ok || !body.collections) throw new Error(body.message || "Сверка не выполнена.");
+      setItems(body.collections);
+      setCheckedAt(body.checkedAt ?? new Date().toISOString());
+    } catch (checkError) {
+      setError(checkError instanceof Error ? checkError.message : "Сверка не выполнена.");
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const mismatches = items.filter((item) => !item.matches);
+
+  return (
+    <section className="border-b border-slate-200 pb-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3 className="text-base font-semibold text-slate-950">Сверка Firestore и D1</h3>
+          <p className="mt-1 text-sm text-slate-500">Проверяет только количество документов и ничего не изменяет.</p>
+        </div>
+        <button type="button" onClick={check} disabled={checking || !apiBase}
+          className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-800 hover:border-[#ea6a00] disabled:cursor-not-allowed disabled:opacity-50">
+          <RefreshCw className={`h-4 w-4 ${checking ? "animate-spin" : ""}`} />
+          {checking ? "Проверяем..." : "Проверить"}
+        </button>
+      </div>
+      {error ? <p className="mt-3 text-sm font-medium text-red-700">{error}</p> : null}
+      {items.length ? (
+        <div className="mt-4 overflow-x-auto">
+          <p className={`mb-3 text-sm font-medium ${mismatches.length ? "text-amber-700" : "text-emerald-700"}`}>
+            {mismatches.length
+              ? `Найдены расхождения в ${mismatches.length} коллекциях.`
+              : "Количество документов совпадает во всех коллекциях."}
+            {checkedAt ? ` Проверено: ${new Date(checkedAt).toLocaleString("ru-RU")}.` : ""}
+          </p>
+          <table className="min-w-full text-left text-sm">
+            <thead className="text-xs uppercase text-slate-500">
+              <tr><th className="py-2 pr-4">Коллекция</th><th className="py-2 pr-4">Firestore</th><th className="py-2 pr-4">D1</th><th className="py-2">Разница</th></tr>
+            </thead>
+            <tbody className="divide-y divide-slate-200">
+              {items.map((item) => (
+                <tr key={item.collection} className={item.matches ? "" : "bg-amber-50"}>
+                  <td className="py-2 pr-4 font-mono text-xs text-slate-800">{item.collection}</td>
+                  <td className="py-2 pr-4 text-slate-700">{item.firestore}</td>
+                  <td className="py-2 pr-4 text-slate-700">{item.d1}</td>
+                  <td className={`py-2 font-medium ${item.matches ? "text-emerald-700" : "text-amber-700"}`}>
+                    {item.difference > 0 ? `+${item.difference}` : item.difference}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -2360,6 +2451,7 @@ function UsersWorkspace({
 
   return (
     <div className="space-y-5">
+      <D1ReconciliationPanel />
       <CrmImportPanel
         preview={importPreview}
         conflicts={importConflicts}

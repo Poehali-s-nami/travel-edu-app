@@ -234,6 +234,32 @@ async function readFirestorePage(env: Env, token: string, collection: string, pa
   return (await response.json()) as { documents?: FirestoreDocument[]; nextPageToken?: string };
 }
 
+async function countFirestoreCollection(env: Env, token: string, collection: string) {
+  const response = await fetch(
+    `https://firestore.googleapis.com/v1/projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents:runAggregationQuery`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        structuredAggregationQuery: {
+          aggregations: [{ alias: "count", count: {} }],
+          structuredQuery: { from: [{ collectionId: collection }] }
+        }
+      })
+    }
+  );
+  if (!response.ok) throw new Error(`Firestore count failed for ${collection}: ${response.status}`);
+  const body = (await response.text()).trim();
+  const rows = body.startsWith("[")
+    ? JSON.parse(body) as Array<{ result?: { aggregateFields?: { count?: { integerValue?: string } } } }>
+    : body.split(/\r?\n/).filter(Boolean).map((line) =>
+        JSON.parse(line) as { result?: { aggregateFields?: { count?: { integerValue?: string } } } });
+  return Number(rows.at(-1)?.result?.aggregateFields?.count?.integerValue ?? 0);
+}
+
 function normalizedStatement(env: Env, collection: string, id: string, data: Record<string, unknown>) {
   const dataJson = JSON.stringify(data);
   if (collection === "accessUsers") {
@@ -505,9 +531,28 @@ async function migratePage(request: Request, env: Env, headers: HeadersInit) {
 
 async function reconciliation(request: Request, env: Env, headers: HeadersInit) {
   if (!(await verifyAdmin(request, env))) return json({ message: "Нет прав администратора." }, 403, headers);
-  const result = await env.DB.prepare(`SELECT collection_name, COUNT(*) AS count
-    FROM firestore_documents GROUP BY collection_name ORDER BY collection_name`).all();
-  return json({ collections: result.results }, 200, headers);
+  const [d1Result, token] = await Promise.all([
+    env.DB.prepare(`SELECT collection_name, COUNT(*) AS count
+      FROM firestore_documents GROUP BY collection_name ORDER BY collection_name`).all<{
+        collection_name: string;
+        count: number;
+      }>(),
+    firestoreToken(env)
+  ]);
+  const d1Counts = new Map(d1Result.results.map((row) => [row.collection_name, Number(row.count)]));
+  const firestoreCounts = await Promise.all(
+    MIGRATED_COLLECTIONS.map((collection) => countFirestoreCollection(env, token, collection))
+  );
+  const collections = MIGRATED_COLLECTIONS.map((collection, index) => {
+    const firestore = firestoreCounts[index];
+    const d1 = d1Counts.get(collection) ?? 0;
+    return { collection, firestore, d1, difference: firestore - d1, matches: firestore === d1 };
+  });
+  return json({
+    checkedAt: new Date().toISOString(),
+    matches: collections.every((item) => item.matches),
+    collections
+  }, 200, headers);
 }
 
 async function catalog(request: Request, env: Env, headers: HeadersInit) {
