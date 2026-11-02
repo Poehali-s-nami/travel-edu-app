@@ -14,7 +14,8 @@
     "test:login-status": "node --test scripts/test-login-status.mjs",
     "test:roles-admin": "node --test scripts/test-admin-training-role.mjs",
     "test:groups": "node --test scripts/test-training-groups.mjs",
-    "test:content-access": "node --test scripts/test-content-access.mjs"
+    "test:content-access": "node --test scripts/test-content-access.mjs",
+    "test:progress": "node --test scripts/test-progress-completion.mjs"
   },
   "dependencies": {
     "firebase": "^11.0.2",

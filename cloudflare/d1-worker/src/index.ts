@@ -1,3 +1,5 @@
+import { DELETE_STALE_MIGRATION_DOCUMENTS_SQL } from "./migration-cleanup";
+
 interface Env {
   DB: D1Database;
   FIREBASE_PROJECT_ID: string;
@@ -408,13 +410,7 @@ async function syncDocuments(request: Request, env: Env, headers: HeadersInit) {
       results.push({ ...item, action: "deleted" });
       continue;
     }
-    const runId = `live-sync:${item.collection}`;
-    const now = new Date().toISOString();
-    await env.DB.prepare(`INSERT INTO migration_runs
-      (id, collection_name, status, started_at, completed_at, initiated_by)
-      VALUES (?, ?, 'completed', ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET completed_at=excluded.completed_at, initiated_by=excluded.initiated_by`)
-      .bind(runId, item.collection, now, now, admin.email.toLowerCase()).run();
+    const runId = await ensureLiveSyncRun(env, item.collection, admin.email.toLowerCase());
     await savePage(env, item.collection, [source], runId);
     results.push({ ...item, action: "upserted" });
   }
@@ -427,10 +423,89 @@ async function syncDocuments(request: Request, env: Env, headers: HeadersInit) {
   return json({ synced: results.length, results }, 200, headers);
 }
 
+async function ensureLiveSyncRun(env: Env, collection: string, initiatedBy: string) {
+  const runId = `live-sync:${collection}`;
+  const now = new Date().toISOString();
+  await env.DB.prepare(`INSERT INTO migration_runs
+    (id, collection_name, status, started_at, completed_at, initiated_by)
+    VALUES (?, ?, 'completed', ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET completed_at=excluded.completed_at, initiated_by=excluded.initiated_by`)
+    .bind(runId, collection, now, now, initiatedBy).run();
+  return runId;
+}
+
+async function syncConfirmedView(request: Request, env: Env, headers: HeadersInit) {
+  const authUser = await verifyFirebaseUser(request, env);
+  if (!authUser?.localId || authUser.disabled) {
+    return json({ message: "Требуется вход." }, 401, headers);
+  }
+
+  const body = (await request.json()) as { materialId?: unknown; deviceId?: unknown };
+  const materialId = typeof body.materialId === "string" ? body.materialId.trim() : "";
+  const deviceId = typeof body.deviceId === "string" ? body.deviceId.trim() : "";
+  if (!materialId || !deviceId || materialId.length > 512 || deviceId.length > 512 ||
+      materialId.includes("/") || deviceId.includes("/")) {
+    return json({ message: "Недопустимые данные просмотра." }, 400, headers);
+  }
+
+  const token = await firestoreToken(env);
+  const isAdmin = authUser.email?.toLowerCase() === env.ADMIN_EMAIL.toLowerCase();
+  if (!isAdmin) {
+    const profileDocument = await readFirestoreDocument(env, token, "accessUsers", authUser.localId);
+    const profile = profileDocument ? decodeFields(profileDocument.fields) : null;
+    if (!profile || profile.active !== true || profile.archived === true ||
+        profile.passwordResetRequested === true || (profile.claimState ?? "claimed") !== "claimed") {
+      return json({ message: "Нет доступа." }, 403, headers);
+    }
+  }
+
+  const viewId = `${materialId}_${deviceId}`;
+  const [material, view] = await Promise.all([
+    readFirestoreDocument(env, token, "materials", materialId),
+    readFirestoreDocument(env, token, "materialViews", viewId)
+  ]);
+  const viewData = view ? decodeFields(view.fields) : null;
+  if (!material || !view || viewData?.materialId !== materialId || viewData.deviceId !== deviceId) {
+    return json({ message: "Подтверждённый просмотр не найден." }, 409, headers);
+  }
+
+  const actor = authUser.localId;
+  const materialRun = await ensureLiveSyncRun(env, "materials", actor);
+  const viewRun = await ensureLiveSyncRun(env, "materialViews", actor);
+  await savePage(env, "materials", [material], materialRun);
+  await savePage(env, "materialViews", [view], viewRun);
+
+  const materialData = decodeFields(material.fields);
+  return json({ synced: true, views: Number(materialData.views ?? 0) }, 200, headers);
+}
+
+async function syncConfirmedProgress(request: Request, env: Env, headers: HeadersInit) {
+  const authUser = await verifyFirebaseUser(request, env);
+  if (!authUser?.localId || authUser.disabled) {
+    return json({ message: "Требуется вход." }, 401, headers);
+  }
+  const body = (await request.json()) as { materialId?: unknown };
+  const materialId = typeof body.materialId === "string" ? body.materialId.trim() : "";
+  if (!materialId || materialId.length > 512 || materialId.includes("/")) {
+    return json({ message: "Некорректный материал." }, 400, headers);
+  }
+
+  const token = await firestoreToken(env);
+  const progressId = `${authUser.localId}_${materialId}`;
+  const progress = await readFirestoreDocument(env, token, "learningProgress", progressId);
+  const data = progress ? decodeFields(progress.fields) : null;
+  if (!progress || data?.userId !== authUser.localId || data.materialId !== materialId) {
+    return json({ message: "Подтверждённый прогресс не найден." }, 409, headers);
+  }
+
+  const runId = await ensureLiveSyncRun(env, "learningProgress", authUser.localId);
+  await savePage(env, "learningProgress", [progress], runId);
+  return json({ synced: true, materialId }, 200, headers);
+}
+
 function cleanupStatements(env: Env, collection: string, runId: string) {
   const statements = [
-    env.DB.prepare(`DELETE FROM firestore_documents
-      WHERE collection_name = ? AND migration_run_id != ?`).bind(collection, runId)
+    env.DB.prepare(DELETE_STALE_MIGRATION_DOCUMENTS_SQL).bind(collection, runId, runId)
   ];
 
   const normalizedTables: Record<string, string> = {
@@ -622,6 +697,12 @@ export default {
       }
       if (request.method === "POST" && url.pathname === "/admin/sync-documents") {
         return await syncDocuments(request, env, headers);
+      }
+      if (request.method === "POST" && url.pathname === "/v1/confirmed-view") {
+        return await syncConfirmedView(request, env, headers);
+      }
+      if (request.method === "POST" && url.pathname === "/v1/confirmed-progress") {
+        return await syncConfirmedProgress(request, env, headers);
       }
       if (request.method === "POST" && url.pathname === "/admin/migrate-page") {
         return await migratePage(request, env, headers);

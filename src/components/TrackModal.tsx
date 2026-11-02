@@ -54,14 +54,14 @@ export function TrackModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-0 sm:p-4">
       <div className="flex h-[100dvh] w-full max-w-4xl flex-col overflow-hidden bg-white shadow-2xl sm:max-h-[92vh] sm:rounded-xl">
         <div className="flex shrink-0 items-start justify-between gap-3 border-b border-slate-100 p-4 sm:gap-4 sm:p-5">
-          <div className="min-w-0">
+          <div className="max-h-[35dvh] min-w-0 overflow-y-auto pr-1 sm:max-h-none sm:overflow-visible sm:pr-0">
             <p className="mb-1 text-sm font-medium text-orange-600">
               {preview ? "Предпросмотр · Обучающий трек" : "Обучающий трек"}
             </p>
-            <h2 className="line-clamp-3 text-xl font-semibold leading-tight text-slate-950 sm:line-clamp-none">
+            <h2 className="break-words text-xl font-semibold leading-tight text-slate-950">
               {track.title}
             </h2>
-            <p className="mt-2 line-clamp-3 max-w-3xl text-sm leading-6 text-slate-500 sm:line-clamp-none">
+            <p className="mt-2 max-w-3xl break-words text-sm leading-6 text-slate-500">
               {track.description}
             </p>
           </div>
@@ -118,10 +118,10 @@ export function TrackModal({
                   {material.type === "file" ? <FileText size={28} className="shrink-0 text-orange-500" /> : null}
                   <span className="min-w-0 flex-1">
                     {material.type === "file" ? <span className="mb-1 block text-xs font-medium text-orange-700">Материал для скачивания</span> : null}
-                    <span className="line-clamp-2 block text-sm font-semibold text-slate-950">
+                    <span className="block break-words text-sm font-semibold text-slate-950 sm:line-clamp-2">
                       {material.title}
                     </span>
-                    <span className="mt-1 line-clamp-2 block text-sm leading-6 text-slate-500">
+                    <span className="mt-1 block break-words text-sm leading-6 text-slate-500 sm:line-clamp-2">
                       {material.description}
                     </span>
                   </span>
