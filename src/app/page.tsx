@@ -569,12 +569,22 @@ export default function Home() {
 
     const pendingSyncKey = `${storageKey}-pending-sync`;
     const syncVersionKey = `${storageKey}-d1-synced-v2`;
+    const applyConfirmedViews = (views: number | null) => {
+      if (views === null) return;
+      const floorKey = `travel-edu-view-floor-${material.id}`;
+      const currentFloor = Number(window.localStorage.getItem(floorKey) ?? 0);
+      const floor = Math.max(Number.isFinite(currentFloor) ? currentFloor : 0, views);
+      window.localStorage.setItem(floorKey, String(floor));
+      setMaterials((current) => current.map((item) =>
+        item.id === material.id ? { ...item, views: Math.max(item.views ?? 0, floor) } : item));
+    };
     const existingDeviceId = window.localStorage.getItem("travel-edu-device-id");
     if (window.localStorage.getItem(storageKey)) {
       if (user && existingDeviceId &&
           (window.localStorage.getItem(pendingSyncKey) || !window.localStorage.getItem(syncVersionKey))) {
         void syncConfirmedView(user, material.id, existingDeviceId)
-          .then(() => {
+          .then((result) => {
+            applyConfirmedViews(result.views);
             window.localStorage.removeItem(pendingSyncKey);
             window.localStorage.setItem(syncVersionKey, "1");
           })
@@ -634,7 +644,8 @@ export default function Home() {
     if (user) {
       window.localStorage.setItem(pendingSyncKey, "1");
       try {
-        await syncConfirmedView(user, material.id, deviceId);
+        const result = await syncConfirmedView(user, material.id, deviceId);
+        applyConfirmedViews(result.views);
         window.localStorage.removeItem(pendingSyncKey);
         window.localStorage.setItem(syncVersionKey, "1");
       } catch (error) {
