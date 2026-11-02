@@ -73,21 +73,8 @@ service cloud.firestore {
     match /learningProgress/{progressId} {
       allow get, list: if isAdmin()
         || (isActiveUser() && resource.data.userId == request.auth.uid);
-      allow create, update: if isActiveUser()
-        && request.resource.data.keys().hasOnly([
-          'userId',
-          'materialId',
-          'materialTitle',
-          'completedAt'
-        ])
-        && request.resource.data.userId == request.auth.uid
-        && request.resource.data.materialId is string
-        && request.resource.data.materialTitle is string
-        && request.resource.data.completedAt == request.time
-        && (
-          !exists(/databases/$(database)/documents/learningProgress/$(progressId))
-          || resource.data.userId == request.auth.uid
-        );
+      // Completion is validated and written by /api/progress/complete.
+      allow create, update: if isAdmin();
       allow delete: if false;
     }
 

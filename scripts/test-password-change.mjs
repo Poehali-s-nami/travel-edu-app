@@ -20,7 +20,19 @@ const module = { exports: {} };
 new Function("require", "module", "exports", compiled)(
   (name) => {
     if (name === "next/server") return {
-      NextResponse: { json: (data, options = {}) => ({ data, status: options.status ?? 200 }) }
+      NextResponse: class NextResponse {
+        constructor(body, options = {}) {
+          this.body = body;
+          this.status = options.status ?? 200;
+          this.headers = options.headers ?? {};
+        }
+
+        static json(data, options = {}) {
+          const response = new this(JSON.stringify(data), options);
+          response.data = data;
+          return response;
+        }
+      }
     };
     throw new Error(`Unexpected import: ${name}`);
   },
@@ -54,9 +66,36 @@ function mockFirebase({ commitFailures = 0 } = {}) {
 function change(password = "Personal123", currentPassword = "Shared123") {
   return POST({
     headers: new Headers({ authorization: "Bearer valid-token" }),
-    json: async () => ({ password, currentPassword })
+    text: async () => JSON.stringify({ password, currentPassword }),
+    url: "https://preview.example.invalid/api/access/confirm-password-change"
   });
 }
+
+test("preview forwards password changes to the configured HTTPS service", async () => {
+  process.env.PASSWORD_CHANGE_SERVICE_URL =
+    "https://psnhub.kz/api/access/confirm-password-change";
+  let forwarded;
+  globalThis.fetch = async (input, init) => {
+    forwarded = { url: String(input), init };
+    return {
+      status: 200,
+      text: async () => JSON.stringify({ changed: true }),
+      headers: new Headers({ "content-type": "application/json" })
+    };
+  };
+  try {
+    const result = await change();
+    assert.equal(result.status, 200);
+    assert.equal(forwarded.url, process.env.PASSWORD_CHANGE_SERVICE_URL);
+    assert.equal(forwarded.init.headers.authorization, "Bearer valid-token");
+    assert.deepEqual(JSON.parse(forwarded.init.body), {
+      password: "Personal123",
+      currentPassword: "Shared123"
+    });
+  } finally {
+    delete process.env.PASSWORD_CHANGE_SERVICE_URL;
+  }
+});
 
 test("password change clears the access gate after changing Auth credentials", async () => {
   const calls = mockFirebase();

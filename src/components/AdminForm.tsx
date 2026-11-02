@@ -4,6 +4,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import {
   createUserWithEmailAndPassword,
+  getIdToken,
   signInWithEmailAndPassword,
   signInWithCustomToken,
   signInWithRedirect,
@@ -63,6 +64,7 @@ import { TrackPreview } from "@/components/TrackPreview";
 import { TrackMaterialPicker } from "@/components/TrackMaterialPicker";
 import { TrainingGroupsWorkspace } from "@/components/TrainingGroupsWorkspace";
 import { AUDIENCE_ROLES } from "@/lib/content-access";
+import { syncD1Documents } from "@/lib/d1-admin-sync";
 import { UnsavedEditorProvider, useEditorDraft, useEditorNavigation } from "@/components/UnsavedEditor";
 import type {
   ContentTab,
@@ -162,6 +164,7 @@ type ImportBatchResult = {
   rotatedPasswords?: number;
   archivedWithoutLogin?: number;
   conflicts?: ImportConflict[];
+  updatedGroupIds?: string[];
 };
 
 type ImportTotals = {
@@ -778,7 +781,8 @@ function AdminWorkspace({
 
     try {
       const batch = writeBatch(db);
-      batch.set(doc(collection(db, "materials")), {
+      const materialRef = doc(collection(db, "materials"));
+      batch.set(materialRef, {
         audience: materialForm.audience,
         title: materialForm.title.trim(),
         hiddenFromLibrary: materialForm.hiddenFromLibrary,
@@ -805,12 +809,19 @@ function AdminWorkspace({
       markCatalogChanged(batch, db);
       await batch.commit();
 
+      try {
+        await syncD1Documents(user, [{ collection: "materials", id: materialRef.id }]);
+        setMessage("Материал добавлен.");
+      } catch (error) {
+        console.warn("D1 material synchronization failed:", error);
+        setMessage("Материал добавлен в Firestore, но D1 не обновился. Повторите сохранение перед публикацией.");
+      }
+
       setMaterialForm({
         ...initialMaterialForm,
         type: tab === "webinars" ? "video" : "file",
         format: tab === "webinars" ? "Вебинар" : "PDF"
       });
-      setMessage("Материал добавлен.");
       return true;
     } catch {
       setMessage("Не удалось сохранить материал. Проверьте права Firestore.");
@@ -832,7 +843,8 @@ function AdminWorkspace({
 
     try {
       const batch = writeBatch(db);
-      batch.set(doc(collection(db, "tracks")), {
+      const trackRef = doc(collection(db, "tracks"));
+      batch.set(trackRef, {
         audience: trackForm.audience,
         title: trackForm.title.trim(),
         description: trackForm.description.trim(),
@@ -847,9 +859,16 @@ function AdminWorkspace({
       markCatalogChanged(batch, db);
       await batch.commit();
 
+      try {
+        await syncD1Documents(user, [{ collection: "tracks", id: trackRef.id }]);
+        setMessage("Обучающий трек добавлен.");
+      } catch (error) {
+        console.warn("D1 track synchronization failed:", error);
+        setMessage("Трек добавлен в Firestore, но D1 не обновился. Повторите сохранение перед публикацией.");
+      }
+
       setTrackForm(initialTrackForm);
       setTrackMaterialIds([]);
-      setMessage("Обучающий трек добавлен.");
       return true;
     } catch {
       setMessage("Не удалось сохранить трек. Проверьте права Firestore.");
@@ -909,8 +928,13 @@ function AdminWorkspace({
 
       markCatalogChanged(batch, db);
       await batch.commit();
-
-      setMessage("Материал обновлен.");
+      try {
+        await syncD1Documents(user, [{ collection: "materials", id }]);
+        setMessage("Материал обновлен.");
+      } catch (error) {
+        console.warn("D1 material synchronization failed:", error);
+        setMessage("Материал обновлен в Firestore, но D1 не обновился. Повторите сохранение перед публикацией.");
+      }
       return true;
     } catch (error) {
       console.error("Failed to update material:", error);
@@ -954,8 +978,13 @@ function AdminWorkspace({
 
       markCatalogChanged(batch, db);
       await batch.commit();
-
-      setMessage("Трек обновлен.");
+      try {
+        await syncD1Documents(user, [{ collection: "tracks", id }]);
+        setMessage("Трек обновлен.");
+      } catch (error) {
+        console.warn("D1 track synchronization failed:", error);
+        setMessage("Трек обновлен в Firestore, но D1 не обновился. Повторите сохранение перед публикацией.");
+      }
       return true;
     } catch (error) {
       console.error("Failed to update track:", error);
@@ -973,7 +1002,13 @@ function AdminWorkspace({
     batch.delete(doc(db, collectionName, id));
     markCatalogChanged(batch, db);
     await batch.commit();
-    setMessage("Запись удалена.");
+    try {
+      await syncD1Documents(user, [{ collection: collectionName, id }]);
+      setMessage("Запись удалена.");
+    } catch (error) {
+      console.warn("D1 deletion synchronization failed:", error);
+      setMessage("Запись удалена из Firestore, но осталась в D1. Не переключайте production до повторной синхронизации.");
+    }
   }
 
   async function updateAccessUser(
@@ -1196,6 +1231,7 @@ function AdminWorkspace({
     try {
       const result: ImportTotals = checkpoint?.result ?? initialResult;
       const conflicts: ImportConflict[] = checkpoint?.conflicts ?? [];
+      let d1SyncWarning = false;
 
       for (let batchIndex = startBatchIndex; batchIndex < batches.length; batchIndex += 1) {
         const batch = batches[batchIndex];
@@ -1297,6 +1333,18 @@ function AdminWorkspace({
             );
           }
 
+          if (batchResult.updatedGroupIds?.length) {
+            try {
+              await syncD1Documents(user, batchResult.updatedGroupIds.map((id) => ({
+                collection: "trainingGroups" as const,
+                id
+              })));
+            } catch (error) {
+              d1SyncWarning = true;
+              console.warn("D1 office group synchronization failed:", error);
+            }
+          }
+
           result.created += batchResult.created ?? 0;
           result.updated += batchResult.updated ?? 0;
           result.skipped += batchResult.skipped ?? 0;
@@ -1320,7 +1368,9 @@ function AdminWorkspace({
       setMessage(
         `Импорт завершен. Импортировано: ${result.imported ?? 0}, создано: ${
           result.created ?? 0
-        }, обновлено: ${result.updated ?? 0}, временных паролей заменено: ${result.rotatedPasswords}, архивировано по ID без логина: ${result.archivedWithoutLogin}, пропущено: ${result.skipped ?? 0}. Конфликтных аккаунтов для ручной проверки: ${conflicts.length}.`
+        }, обновлено: ${result.updated ?? 0}, временных паролей заменено: ${result.rotatedPasswords}, архивировано по ID без логина: ${result.archivedWithoutLogin}, пропущено: ${result.skipped ?? 0}. Конфликтных аккаунтов для ручной проверки: ${conflicts.length}.${
+          d1SyncWarning ? " Некоторые офисные группы не синхронизированы с D1; повторите импорт перед переключением production." : ""
+        }`
       );
       setImportTemporaryPassword("");
       try {
@@ -2182,7 +2232,7 @@ function CrmImportPanel({
           ) : null}
 
           <label className="block max-w-md text-sm font-medium text-slate-800">
-            Общий временный пароль для новых пользователей
+            Общий временный пароль для новых пользователей и CRM-аккаунтов без личного пароля
             <input
               type="password"
               value={temporaryPassword}
@@ -2195,7 +2245,8 @@ function CrmImportPanel({
               className="mt-2 w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-slate-950 outline-none focus:border-[#ea6a00]"
             />
             <span className="mt-1 block text-xs font-normal text-slate-500">
-              Пароль не сохраняется в истории импорта. Действующие пароли не изменятся.
+              Пароль не сохраняется в истории импорта. Личные пароли, пароли после точечного
+              сброса администратором и пароли вручную созданных аккаунтов не изменятся.
             </span>
           </label>
 
@@ -2235,6 +2286,155 @@ function ImportStat({ label, value }: { label: string; value: number }) {
       <p className="text-xs font-medium text-slate-500">{label}</p>
       <p className="mt-1 text-xl font-semibold text-slate-950">{value}</p>
     </div>
+  );
+}
+
+type D1ReconciliationItem = {
+  collection: string;
+  firestore: number;
+  d1: number;
+  difference: number;
+  matches: boolean;
+};
+
+function D1ReconciliationPanel() {
+  const [checking, setChecking] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [syncProgress, setSyncProgress] = useState("");
+  const [checkedAt, setCheckedAt] = useState("");
+  const [items, setItems] = useState<D1ReconciliationItem[]>([]);
+  const [error, setError] = useState("");
+  const apiBase = (process.env.NEXT_PUBLIC_CONTENT_API_URL ?? "").replace(/\/v1\/catalog\/?$/, "");
+
+  const check = async () => {
+    if (!auth?.currentUser || !apiBase) {
+      setError("Проверка D1 доступна только на тестовом стенде с подключённым API.");
+      return;
+    }
+    setChecking(true);
+    setError("");
+    try {
+      const token = await getIdToken(auth.currentUser);
+      const response = await fetch(`${apiBase}/admin/reconciliation`, {
+        headers: { authorization: `Bearer ${token}` }
+      });
+      const body = await response.json() as {
+        checkedAt?: string;
+        collections?: D1ReconciliationItem[];
+        message?: string;
+      };
+      if (!response.ok || !body.collections) throw new Error(body.message || "Сверка не выполнена.");
+      setItems(body.collections);
+      setCheckedAt(body.checkedAt ?? new Date().toISOString());
+      return body.collections;
+    } catch (checkError) {
+      setError(checkError instanceof Error ? checkError.message : "Сверка не выполнена.");
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const mismatches = items.filter((item) => !item.matches);
+
+  const syncMismatches = async () => {
+    if (!auth?.currentUser || !apiBase || !mismatches.length) return;
+    setSyncing(true);
+    setError("");
+    try {
+      const token = await getIdToken(auth.currentUser);
+      for (let collectionIndex = 0; collectionIndex < mismatches.length; collectionIndex += 1) {
+        const collection = mismatches[collectionIndex].collection;
+        let pageToken = "";
+        let runId = "";
+        let page = 0;
+        do {
+          page += 1;
+          setSyncProgress(`${collectionIndex + 1} из ${mismatches.length}: ${collection}, страница ${page}`);
+          let response: Response | null = null;
+          for (let attempt = 1; attempt <= 3; attempt += 1) {
+            response = await fetch(`${apiBase}/admin/migrate-page`, {
+              method: "POST",
+              headers: {
+                authorization: `Bearer ${token}`,
+                "content-type": "application/json"
+              },
+              body: JSON.stringify({ collection, pageSize: 100, pageToken, runId })
+            });
+            if (response.ok || response.status < 500) break;
+            await new Promise((resolve) => window.setTimeout(resolve, attempt * 1000));
+          }
+          const body = await response?.json() as {
+            runId?: string;
+            nextPageToken?: string | null;
+            message?: string;
+          } | undefined;
+          if (!response?.ok || !body?.runId) throw new Error(body?.message || `Не удалось синхронизировать ${collection}.`);
+          runId = body.runId;
+          pageToken = body.nextPageToken ?? "";
+        } while (pageToken);
+      }
+      setSyncProgress("Синхронизация завершена. Проверяем результат...");
+      await check();
+    } catch (syncError) {
+      setError(syncError instanceof Error ? syncError.message : "Синхронизация не выполнена.");
+    } finally {
+      setSyncing(false);
+      setSyncProgress("");
+    }
+  };
+
+  return (
+    <section className="border-b border-slate-200 pb-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h3 className="text-base font-semibold text-slate-950">Сверка Firestore и D1</h3>
+          <p className="mt-1 text-sm text-slate-500">Проверяет только количество документов и ничего не изменяет.</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" onClick={check} disabled={checking || syncing || !apiBase}
+            className="inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-800 hover:border-[#ea6a00] disabled:cursor-not-allowed disabled:opacity-50">
+            <RefreshCw className={`h-4 w-4 ${checking ? "animate-spin" : ""}`} />
+            {checking ? "Проверяем..." : "Проверить"}
+          </button>
+          {mismatches.length ? (
+            <button type="button" onClick={syncMismatches} disabled={checking || syncing}
+              className="inline-flex items-center gap-2 rounded-lg bg-[#ea6a00] px-3 py-2 text-sm font-semibold text-white hover:bg-[#d45f00] disabled:cursor-not-allowed disabled:opacity-50">
+              <RefreshCw className={`h-4 w-4 ${syncing ? "animate-spin" : ""}`} />
+              {syncing ? "Синхронизируем..." : `Синхронизировать (${mismatches.length})`}
+            </button>
+          ) : null}
+        </div>
+      </div>
+      {error ? <p className="mt-3 text-sm font-medium text-red-700">{error}</p> : null}
+      {syncProgress ? <p className="mt-3 text-sm font-medium text-slate-700">{syncProgress}</p> : null}
+      {items.length ? (
+        <div className="mt-4 overflow-x-auto">
+          <p className={`mb-3 text-sm font-medium ${mismatches.length ? "text-amber-700" : "text-emerald-700"}`}>
+            {mismatches.length
+              ? `Найдены расхождения в ${mismatches.length} коллекциях.`
+              : "Количество документов совпадает во всех коллекциях."}
+            {checkedAt ? ` Проверено: ${new Date(checkedAt).toLocaleString("ru-RU")}.` : ""}
+          </p>
+          <table className="min-w-full text-left text-sm">
+            <thead className="text-xs uppercase text-slate-500">
+              <tr><th className="py-2 pr-4">Коллекция</th><th className="py-2 pr-4">Firestore</th><th className="py-2 pr-4">D1</th><th className="py-2">Разница</th></tr>
+            </thead>
+            <tbody className="divide-y divide-slate-200">
+              {items.map((item) => (
+                <tr key={item.collection} className={item.matches ? "" : "bg-amber-50"}>
+                  <td className="py-2 pr-4 font-mono text-xs text-slate-800">{item.collection}</td>
+                  <td className="py-2 pr-4 text-slate-700">{item.firestore}</td>
+                  <td className="py-2 pr-4 text-slate-700">{item.d1}</td>
+                  <td className={`py-2 font-medium ${item.matches ? "text-emerald-700" : "text-amber-700"}`}>
+                    {item.difference > 0 ? `+${item.difference}` : item.difference}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -2311,6 +2511,7 @@ function UsersWorkspace({
 
   return (
     <div className="space-y-5">
+      <D1ReconciliationPanel />
       <CrmImportPanel
         preview={importPreview}
         conflicts={importConflicts}

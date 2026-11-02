@@ -18,7 +18,6 @@ import {
   query,
   runTransaction,
   serverTimestamp,
-  setDoc,
   Timestamp,
   where
 } from "firebase/firestore";
@@ -53,6 +52,8 @@ import { UserLogin } from "@/components/UserLogin";
 import { PasswordChangeGate } from "@/components/PasswordChangeGate";
 import { ADMIN_EMAIL, auth, db } from "@/lib/firebase";
 import { loadAccessibleContent } from "@/lib/content-client";
+import { syncConfirmedView } from "@/lib/d1-view-sync";
+import { completeMaterialProgress } from "@/lib/progress-client";
 import {
   demoMaterials,
   demoTracks,
@@ -489,7 +490,13 @@ export default function Home() {
       const currentRevision = ++revision;
       void loadAccessibleContent(user).then((content) => {
         if (cancelled || currentRevision !== revision) return;
-        setMaterials(content.materials);
+        setMaterials(content.materials.map((material) => {
+          const floorKey = `travel-edu-view-floor-${material.id}`;
+          const floor = Number(window.localStorage.getItem(floorKey) ?? 0);
+          const views = Math.max(material.views ?? 0, Number.isFinite(floor) ? floor : 0);
+          if (views <= (material.views ?? 0)) window.localStorage.removeItem(floorKey);
+          return views === material.views ? material : { ...material, views };
+        }));
         setTracks(content.tracks);
         setContentLoadError(false);
       }).catch((error) => {
@@ -560,18 +567,31 @@ export default function Home() {
 
     const storageKey = `travel-edu-viewed-${material.id}`;
 
+    const pendingSyncKey = `${storageKey}-pending-sync`;
+    const syncVersionKey = `${storageKey}-d1-synced-v2`;
+    const applyConfirmedViews = (views: number | null) => {
+      if (views === null) return;
+      const floorKey = `travel-edu-view-floor-${material.id}`;
+      const currentFloor = Number(window.localStorage.getItem(floorKey) ?? 0);
+      const floor = Math.max(Number.isFinite(currentFloor) ? currentFloor : 0, views);
+      window.localStorage.setItem(floorKey, String(floor));
+      setMaterials((current) => current.map((item) =>
+        item.id === material.id ? { ...item, views: Math.max(item.views ?? 0, floor) } : item));
+    };
+    const existingDeviceId = window.localStorage.getItem("travel-edu-device-id");
     if (window.localStorage.getItem(storageKey)) {
+      if (user && existingDeviceId &&
+          (window.localStorage.getItem(pendingSyncKey) || !window.localStorage.getItem(syncVersionKey))) {
+        void syncConfirmedView(user, material.id, existingDeviceId)
+          .then((result) => {
+            applyConfirmedViews(result.views);
+            window.localStorage.removeItem(pendingSyncKey);
+            window.localStorage.setItem(syncVersionKey, "1");
+          })
+          .catch((error) => console.warn("D1 webinar view synchronization is still pending:", error));
+      }
       return;
     }
-
-    window.localStorage.setItem(storageKey, "1");
-    setMaterials((current) =>
-      current.map((item) =>
-        item.id === material.id
-          ? { ...item, views: (item.views ?? 0) + 1 }
-          : item
-      )
-    );
 
     if (!db || material.id.startsWith("demo-")) {
       return;
@@ -586,8 +606,9 @@ export default function Home() {
       window.localStorage.setItem("travel-edu-device-id", deviceId);
     }
 
+    let created = false;
     try {
-      await runTransaction(firestore, async (transaction) => {
+      created = await runTransaction(firestore, async (transaction) => {
         const viewRef = doc(
           firestore,
           "materialViews",
@@ -597,7 +618,7 @@ export default function Home() {
         const existingView = await transaction.get(viewRef);
 
         if (existingView.exists()) {
-          return;
+          return false;
         }
 
         transaction.set(viewRef, {
@@ -606,9 +627,30 @@ export default function Home() {
           createdAt: serverTimestamp()
         });
         transaction.update(materialRef, { views: increment(1) });
+        return true;
       });
     } catch (error) {
       console.warn("The webinar view could not be saved:", error);
+      return;
+    }
+
+    window.localStorage.setItem(storageKey, "1");
+    if (created) {
+      const floor = (material.views ?? 0) + 1;
+      window.localStorage.setItem(`travel-edu-view-floor-${material.id}`, String(floor));
+      setMaterials((current) => current.map((item) =>
+        item.id === material.id ? { ...item, views: Math.max(item.views ?? 0, floor) } : item));
+    }
+    if (user) {
+      window.localStorage.setItem(pendingSyncKey, "1");
+      try {
+        const result = await syncConfirmedView(user, material.id, deviceId);
+        applyConfirmedViews(result.views);
+        window.localStorage.removeItem(pendingSyncKey);
+        window.localStorage.setItem(syncVersionKey, "1");
+      } catch (error) {
+        console.warn("D1 webinar view synchronization is pending:", error);
+      }
     }
   }
 
@@ -628,21 +670,8 @@ export default function Home() {
       throw new Error("Сначала войдите в свой аккаунт.");
     }
 
-    if (!db) {
-      throw new Error("База данных временно недоступна. Попробуйте позже.");
-    }
-
     try {
-      await setDoc(
-        doc(db, "learningProgress", `${user.uid}_${material.id}`),
-        {
-          userId: user.uid,
-          materialId: material.id,
-          materialTitle: material.title,
-          completedAt: serverTimestamp()
-        },
-        { merge: true }
-      );
+      await completeMaterialProgress(user, material.id);
       setCompletedMaterialIds((current) => new Set(current).add(material.id));
     } catch (error) {
       console.warn("Learning progress could not be saved:", error);
@@ -873,7 +902,7 @@ export default function Home() {
   }
 
   return (
-    <main className="min-h-screen bg-slate-50">
+    <main className="min-h-screen overflow-x-hidden bg-slate-50">
       {contentLoadError ? <p role="alert" className="bg-red-50 px-4 py-3 text-center text-sm text-red-700">Не удалось загрузить материалы. Обновите страницу и попробуйте ещё раз.</p> : null}
       {isImpersonating ? (
         <div className="border-b border-orange-200 bg-orange-50 px-4 py-2 text-center text-sm text-slate-800">
@@ -1021,7 +1050,7 @@ export default function Home() {
             }}
           />
 
-          <section className="space-y-5">
+          <section className="min-w-0 space-y-5">
             {activeTab === "webinars" ? (
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div role="group" aria-label="Формат видео" className="flex max-w-full gap-1 overflow-x-auto rounded-lg bg-white p-1 ring-1 ring-slate-200">

@@ -128,14 +128,14 @@ export function ContentModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 p-0 sm:p-4">
       <div className="flex h-[100dvh] w-full max-w-5xl flex-col overflow-hidden bg-white shadow-2xl sm:h-[calc(100vh-2rem)] sm:max-h-[92vh] sm:rounded-xl">
         <div className="flex shrink-0 items-start justify-between gap-3 border-b border-slate-100 p-4 sm:gap-4 sm:p-5">
-          <div className="min-w-0">
+          <div className="max-h-[35dvh] min-w-0 overflow-y-auto pr-1 sm:max-h-none sm:overflow-visible sm:pr-0">
             <p className="mb-1 text-sm font-medium text-[#ea6a00]">
               {material.format}
             </p>
-            <h2 className="line-clamp-3 text-xl font-semibold leading-tight text-slate-950 sm:line-clamp-none">
+            <h2 className="break-words text-xl font-semibold leading-tight text-slate-950">
               {material.title}
             </h2>
-            <p className="mt-2 line-clamp-3 max-w-3xl text-sm leading-6 text-slate-500 sm:line-clamp-none">
+            <p className="mt-2 max-w-3xl break-words text-sm leading-6 text-slate-500">
               {material.description}
             </p>
           </div>
@@ -166,7 +166,7 @@ export function ContentModal({
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto border-t border-slate-100 p-4 sm:shrink-0 sm:flex-none sm:overflow-visible sm:p-5">
-          <div className="flex max-h-20 flex-wrap gap-2 overflow-hidden sm:max-h-none">
+          <div className="flex max-h-20 flex-wrap gap-2 overflow-y-auto sm:max-h-none">
             {[...material.category, ...(material.tags ?? [])].map((tag) => (
               <span
                 key={tag}

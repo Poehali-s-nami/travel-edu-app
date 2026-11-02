@@ -9,6 +9,7 @@ dist
 .codex
 .cache
 .cloudflare-local
+.wrangler
 .cloudflare-templates
 .local-bin
 .pnpm-home

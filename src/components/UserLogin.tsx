@@ -8,54 +8,6 @@ import AnimatedTravelHero from "@/components/AnimatedTravelHero";
 import { loginToFirebaseEmail } from "@/lib/access";
 import { auth } from "@/lib/firebase";
 
-type LoginStatus =
-  | "active"
-  | "admin"
-  | "archived"
-  | "blocked"
-  | "unclaimed"
-  | "empty"
-  | "not-found"
-  | "unknown";
-
-async function getLoginStatus(login: string) {
-  try {
-    const response = await fetch("/api/access/login-status", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ login })
-    });
-    const data = (await response.json()) as { status?: LoginStatus };
-    return data.status ?? "unknown";
-  } catch {
-    return "unknown";
-  }
-}
-
-function getLoginErrorMessage(status: LoginStatus) {
-  if (status === "not-found") {
-    return "Пользователь не найден. Проверьте CRM-логин или ФИО как в CRM.";
-  }
-
-  if (status === "blocked") {
-    return "Доступ заблокирован. Обратитесь к администратору PSN HUB.";
-  }
-
-  if (status === "archived") {
-    return "Доступ архивирован. Обратитесь к администратору PSN HUB.";
-  }
-
-  if (status === "unclaimed") {
-    return "Аккаунт ещё не подготовлен. Обратитесь к администратору PSN HUB.";
-  }
-
-  if (status === "active" || status === "admin") {
-    return "Пароль неверный. Проверьте введенные данные.";
-  }
-
-  return "Не удалось войти. Проверьте логин и пароль.";
-}
-
 export function UserLogin() {
   const [login, setLogin] = useState("");
   const [password, setPassword] = useState("");
@@ -78,8 +30,7 @@ export function UserLogin() {
       const email = await loginToFirebaseEmail(login);
       await signInWithEmailAndPassword(auth, email, password);
     } catch {
-      const status = await getLoginStatus(login);
-      setMessage(getLoginErrorMessage(status));
+      setMessage("Не удалось войти. Проверьте логин и пароль.");
     } finally {
       setIsSubmitting(false);
     }

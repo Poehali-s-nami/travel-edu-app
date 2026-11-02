@@ -381,6 +381,7 @@ test("CRM import creates one office group per office ID without touching manual 
   const officeWrites = writes.filter((item) => item.update.name.includes("/trainingGroups/"));
   assert.equal(officeWrites.length, 1);
   assert.equal(officeWrites[0].update.name.split("/").at(-1), trainingGroups.officeGroupId("42"));
+  assert.deepEqual(response.data.updatedGroupIds, [trainingGroups.officeGroupId("42")]);
   assert.equal(officeWrites[0].update.fields.name.stringValue, "Центральный офис");
   assert.equal(officeWrites[0].update.fields.trackIds, undefined);
   assert.equal(writes.find((item) => item.update.name.endsWith("/accessUsers/crm-1")).update.fields.groupIds, undefined);
@@ -393,6 +394,7 @@ test("office group is created when CRM supplies only the office ID", async () =>
   const office = state.commits[0].writes.find((item) => item.update.name.includes("/trainingGroups/"));
   assert.equal(office.update.fields.officeId.stringValue, "77");
   assert.equal(office.update.fields.name.stringValue, "Офис 77");
+  assert.deepEqual(response.data.updatedGroupIds, [trainingGroups.officeGroupId("77")]);
 });
 
 test("name fallback creates a new account with its unique derived login", async () => {

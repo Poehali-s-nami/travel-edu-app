@@ -13,6 +13,10 @@ const FIREBASE_PROJECT_ID =
   process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID ?? "travel-edu-app";
 const PASSWORD_PATTERN = /^(?=.*\p{L})(?=.*\d).{6,}$/u;
 
+function passwordChangeServiceUrl() {
+  return process.env.PASSWORD_CHANGE_SERVICE_URL?.trim() ?? "";
+}
+
 function json(data: unknown, status = 200) {
   return NextResponse.json(data, {
     status,
@@ -133,7 +137,8 @@ export async function POST(request: NextRequest) {
     const idToken = authorization.startsWith("Bearer ")
       ? authorization.slice(7).trim()
       : "";
-    const body = (await request.json()) as { password?: string; currentPassword?: string };
+    const requestBody = await request.text();
+    const body = JSON.parse(requestBody) as { password?: string; currentPassword?: string };
     const password = body.password ?? "";
     const currentPassword = body.currentPassword ?? "";
 
@@ -146,6 +151,32 @@ export async function POST(request: NextRequest) {
     }
     if (!currentPassword || currentPassword === password) {
       return json({ message: "Введите текущий пароль и выберите другой новый пароль." }, 400);
+    }
+
+    const serviceUrlValue = passwordChangeServiceUrl();
+    if (serviceUrlValue) {
+      const serviceUrl = new URL(serviceUrlValue);
+      const requestUrl = new URL(request.url);
+      if (serviceUrl.protocol !== "https:") {
+        throw new Error("Password change service must use HTTPS");
+      }
+      if (serviceUrl.origin !== requestUrl.origin) {
+        const response = await fetch(serviceUrl, {
+          method: "POST",
+          headers: {
+            authorization,
+            "content-type": "application/json"
+          },
+          body: requestBody
+        });
+        return new NextResponse(await response.text(), {
+          status: response.status,
+          headers: {
+            "cache-control": "no-store",
+            "content-type": response.headers.get("content-type") ?? "application/json; charset=utf-8"
+          }
+        });
+      }
     }
 
     const verifiedUser = await verifyUser(idToken);
