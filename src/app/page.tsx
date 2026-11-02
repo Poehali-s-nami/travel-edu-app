@@ -568,11 +568,16 @@ export default function Home() {
     const storageKey = `travel-edu-viewed-${material.id}`;
 
     const pendingSyncKey = `${storageKey}-pending-sync`;
+    const syncVersionKey = `${storageKey}-d1-synced-v2`;
     const existingDeviceId = window.localStorage.getItem("travel-edu-device-id");
     if (window.localStorage.getItem(storageKey)) {
-      if (user && existingDeviceId && window.localStorage.getItem(pendingSyncKey)) {
+      if (user && existingDeviceId &&
+          (window.localStorage.getItem(pendingSyncKey) || !window.localStorage.getItem(syncVersionKey))) {
         void syncConfirmedView(user, material.id, existingDeviceId)
-          .then(() => window.localStorage.removeItem(pendingSyncKey))
+          .then(() => {
+            window.localStorage.removeItem(pendingSyncKey);
+            window.localStorage.setItem(syncVersionKey, "1");
+          })
           .catch((error) => console.warn("D1 webinar view synchronization is still pending:", error));
       }
       return;
@@ -631,6 +636,7 @@ export default function Home() {
       try {
         await syncConfirmedView(user, material.id, deviceId);
         window.localStorage.removeItem(pendingSyncKey);
+        window.localStorage.setItem(syncVersionKey, "1");
       } catch (error) {
         console.warn("D1 webinar view synchronization is pending:", error);
       }
