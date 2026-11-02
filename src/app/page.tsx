@@ -902,7 +902,7 @@ export default function Home() {
   }
 
   return (
-    <main className="min-h-screen bg-slate-50">
+    <main className="min-h-screen overflow-x-hidden bg-slate-50">
       {contentLoadError ? <p role="alert" className="bg-red-50 px-4 py-3 text-center text-sm text-red-700">Не удалось загрузить материалы. Обновите страницу и попробуйте ещё раз.</p> : null}
       {isImpersonating ? (
         <div className="border-b border-orange-200 bg-orange-50 px-4 py-2 text-center text-sm text-slate-800">
@@ -1050,7 +1050,7 @@ export default function Home() {
             }}
           />
 
-          <section className="space-y-5">
+          <section className="min-w-0 space-y-5">
             {activeTab === "webinars" ? (
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div role="group" aria-label="Формат видео" className="flex max-w-full gap-1 overflow-x-auto rounded-lg bg-white p-1 ring-1 ring-slate-200">
