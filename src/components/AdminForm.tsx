@@ -79,7 +79,7 @@ import type { AccessUser, TrainingRole } from "@/types/access-user";
 import type { TrainingGroup } from "@/types/training-group";
 
 const CRM_IMPORT_BATCH_SIZE = 12;
-const CRM_IMPORT_REQUEST_SIZE = 2;
+const CRM_IMPORT_REQUEST_SIZE = 1;
 const CRM_IMPORT_MAX_ATTEMPTS = 6;
 const CRM_IMPORT_CHECKPOINT_KEY = "psn-hub-crm-import-checkpoint-v1";
 
@@ -180,6 +180,7 @@ type ImportCheckpoint = {
   fileKey: string;
   totalBatches: number;
   nextBatchIndex: number;
+  nextRequestIndex?: number;
   result: ImportTotals;
   conflicts: ImportConflict[];
 };
@@ -1196,7 +1197,7 @@ function AdminWorkspace({
       checkpoint &&
       checkpoint.fileKey === importFileKey &&
       checkpoint.totalBatches === batches.length &&
-      checkpoint.nextBatchIndex > 0 &&
+      checkpoint.nextBatchIndex >= 0 &&
       checkpoint.nextBatchIndex <= batches.length
     );
 
@@ -1207,7 +1208,7 @@ function AdminWorkspace({
     if (
       canResume && checkpoint &&
       !window.confirm(
-        `Найден незавершённый импорт этого файла. Последняя подтверждённая партия: ${checkpoint.nextBatchIndex} из ${batches.length}. Нажмите «ОК», чтобы продолжить, или «Отмена», чтобы начать заново. Для продолжения укажите тот же временный пароль.`
+        `Найден незавершённый импорт этого файла. Подтверждено пользователей: ${checkpoint.result.imported}. Нажмите «ОК», чтобы продолжить с сохранённого места, или «Отмена», чтобы начать заново. Для продолжения укажите тот же временный пароль.`
       )
     ) {
       clearImportCheckpoint();
@@ -1236,13 +1237,20 @@ function AdminWorkspace({
       for (let batchIndex = startBatchIndex; batchIndex < batches.length; batchIndex += 1) {
         const batch = batches[batchIndex];
         const requestBatches: ParsedImportUser[][] = [];
-        const confirmedImportedBeforeBatch = result.imported;
         for (let index = 0; index < batch.length; index += CRM_IMPORT_REQUEST_SIZE) {
           requestBatches.push(batch.slice(index, index + CRM_IMPORT_REQUEST_SIZE));
         }
 
-        for (let requestIndex = 0; requestIndex < requestBatches.length; requestIndex += 1) {
+        const startRequestIndex = batchIndex === startBatchIndex
+          ? checkpoint?.nextRequestIndex ?? 0
+          : 0;
+        for (
+          let requestIndex = startRequestIndex;
+          requestIndex < requestBatches.length;
+          requestIndex += 1
+        ) {
           const requestBatch = requestBatches[requestIndex];
+          const confirmedImportedBeforeRequest = result.imported;
           const isFinalRequest =
             batchIndex === batches.length - 1 &&
             requestIndex === requestBatches.length - 1;
@@ -1290,7 +1298,7 @@ function AdminWorkspace({
             } catch {
               if (attempt === CRM_IMPORT_MAX_ATTEMPTS) {
                 throw new Error(
-                  `Импорт остановлен на партии ${batchIndex + 1} из ${batches.length}: сервер недоступен после ${CRM_IMPORT_MAX_ATTEMPTS} попыток. Уже подтверждено: ${confirmedImportedBeforeBatch} пользователей. Точка продолжения сохранена.`
+                  `Импорт остановлен на партии ${batchIndex + 1} из ${batches.length}: сервер недоступен после ${CRM_IMPORT_MAX_ATTEMPTS} попыток. Уже подтверждено: ${confirmedImportedBeforeRequest} пользователей. Точка продолжения сохранена.`
                 );
               }
               await waitForImportRetry(1500 * attempt);
@@ -1320,7 +1328,7 @@ function AdminWorkspace({
                 ? batchResult.message ?? "Не удалось выполнить импорт."
                 : `сервер вернул HTML или другой некорректный ответ (HTTP ${response.status})`;
               throw new Error(
-                `Импорт остановлен на партии ${batchIndex + 1} из ${batches.length}: ${responseKind} Уже подтверждено: ${confirmedImportedBeforeBatch} пользователей. Точка продолжения сохранена.`
+                `Импорт остановлен на партии ${batchIndex + 1} из ${batches.length}: ${responseKind} Уже подтверждено: ${confirmedImportedBeforeRequest} пользователей. Точка продолжения сохранена.`
               );
             }
 
@@ -1352,15 +1360,17 @@ function AdminWorkspace({
           result.rotatedPasswords += batchResult.rotatedPasswords ?? 0;
           result.archivedWithoutLogin += batchResult.archivedWithoutLogin ?? 0;
           conflicts.push(...(batchResult.conflicts ?? []));
-        }
 
-        writeImportCheckpoint({
-          fileKey: importFileKey,
-          totalBatches: batches.length,
-          nextBatchIndex: batchIndex + 1,
-          result,
-          conflicts
-        });
+          const requestCompletedBatch = requestIndex + 1 >= requestBatches.length;
+          writeImportCheckpoint({
+            fileKey: importFileKey,
+            totalBatches: batches.length,
+            nextBatchIndex: requestCompletedBatch ? batchIndex + 1 : batchIndex,
+            nextRequestIndex: requestCompletedBatch ? 0 : requestIndex + 1,
+            result,
+            conflicts
+          });
+        }
       }
 
       clearImportCheckpoint();
@@ -2304,7 +2314,10 @@ function D1ReconciliationPanel() {
   const [checkedAt, setCheckedAt] = useState("");
   const [items, setItems] = useState<D1ReconciliationItem[]>([]);
   const [error, setError] = useState("");
-  const apiBase = (process.env.NEXT_PUBLIC_CONTENT_API_URL ?? "").replace(/\/v1\/catalog\/?$/, "");
+  const apiBase = (
+    process.env.NEXT_PUBLIC_CONTENT_API_URL?.trim()
+      || "https://api.psnhub.kz/v1/catalog"
+  ).replace(/\/v1\/catalog\/?$/, "");
 
   const check = async () => {
     if (!auth?.currentUser || !apiBase) {

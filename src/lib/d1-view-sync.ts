@@ -1,6 +1,7 @@
 import type { User } from "firebase/auth";
 
-const contentApiUrl = process.env.NEXT_PUBLIC_CONTENT_API_URL?.trim();
+const contentApiUrl = process.env.NEXT_PUBLIC_CONTENT_API_URL?.trim()
+  || "https://api.psnhub.kz/v1/catalog";
 
 function confirmedViewApiUrl() {
   if (!contentApiUrl) return null;

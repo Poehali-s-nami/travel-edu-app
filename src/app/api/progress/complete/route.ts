@@ -5,7 +5,8 @@ export const runtime = "edge";
 const projectId = process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID ?? "travel-edu-app";
 const apiKey = process.env.NEXT_PUBLIC_FIREBASE_API_KEY ?? "AIzaSyBvX9x2IFLzG5nf8akzWmzLuv7r442XiKY";
 const firestoreBase = `https://firestore.googleapis.com/v1/projects/${projectId}/databases/(default)/documents`;
-const contentApiUrl = process.env.NEXT_PUBLIC_CONTENT_API_URL?.trim();
+const contentApiUrl = process.env.NEXT_PUBLIC_CONTENT_API_URL?.trim()
+  || "https://api.psnhub.kz/v1/catalog";
 
 function base64Url(input: ArrayBuffer | string) {
   const bytes = typeof input === "string" ? new TextEncoder().encode(input) : new Uint8Array(input);

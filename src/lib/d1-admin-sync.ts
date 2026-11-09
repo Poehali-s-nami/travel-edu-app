@@ -3,7 +3,8 @@ import type { User } from "firebase/auth";
 export type D1SyncCollection = "materials" | "tracks" | "trainingGroups";
 export type D1SyncDocument = { collection: D1SyncCollection; id: string };
 
-const contentApiUrl = process.env.NEXT_PUBLIC_CONTENT_API_URL?.trim();
+const contentApiUrl = process.env.NEXT_PUBLIC_CONTENT_API_URL?.trim()
+  || "https://api.psnhub.kz/v1/catalog";
 
 function syncApiUrl() {
   if (!contentApiUrl) return null;

@@ -6,7 +6,8 @@ type ContentResponse = {
   tracks: Array<Record<string, unknown>>;
 };
 
-const d1ContentApiUrl = process.env.NEXT_PUBLIC_CONTENT_API_URL?.trim();
+const contentApiUrl = process.env.NEXT_PUBLIC_CONTENT_API_URL?.trim()
+  || "https://api.psnhub.kz/v1/catalog";
 
 function normalizeContent(result: ContentResponse) {
   if (!Array.isArray(result.materials) || !Array.isArray(result.tracks)) {
@@ -36,14 +37,10 @@ async function requestContent(url: string, token: string, timeoutMs?: number) {
 
 export async function loadAccessibleContent(user: User): Promise<{ materials: Material[]; tracks: LearningTrack[] }> {
   const token = await getIdToken(user);
-
-  if (d1ContentApiUrl) {
-    try {
-      return await requestContent(d1ContentApiUrl, token, 4_000);
-    } catch (error) {
-      console.warn("D1 content request failed; using Firestore fallback.", error);
-    }
+  try {
+    return await requestContent(contentApiUrl, token, 4_000);
+  } catch (error) {
+    console.warn("D1 content request failed; using Firestore fallback.", error);
+    return requestContent("/api/content", token);
   }
-
-  return requestContent("/api/content", token);
 }
