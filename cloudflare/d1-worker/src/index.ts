@@ -503,6 +503,74 @@ async function syncConfirmedProgress(request: Request, env: Env, headers: Header
   return json({ synced: true, materialId }, 200, headers);
 }
 
+async function completeProgress(request: Request, env: Env, headers: HeadersInit) {
+  const authUser = await verifyFirebaseUser(request, env);
+  if (!authUser?.localId || authUser.disabled) {
+    return json({ message: "Требуется вход." }, 401, headers);
+  }
+  const body = (await request.json()) as { materialId?: unknown };
+  const materialId = typeof body.materialId === "string" ? body.materialId.trim() : "";
+  if (!materialId || materialId.length > 512 || materialId.includes("/")) {
+    return json({ message: "Некорректный материал." }, 400, headers);
+  }
+
+  const token = await firestoreToken(env);
+  const isAdmin = authUser.email?.toLowerCase() === env.ADMIN_EMAIL.toLowerCase();
+  const profileDocument = isAdmin
+    ? null
+    : await readFirestoreDocument(env, token, "accessUsers", authUser.localId);
+  const profile = profileDocument ? decodeFields(profileDocument.fields) : null;
+  if (!isAdmin && (!profile || profile.active !== true || profile.archived === true ||
+      profile.passwordResetRequested === true || (profile.claimState ?? "claimed") !== "claimed")) {
+    return json({ message: "Нет доступа." }, 403, headers);
+  }
+
+  const materialRow = await env.DB.prepare("SELECT data_json FROM materials WHERE id = ?")
+    .bind(materialId).first<{ data_json: string }>();
+  if (!materialRow) return json({ message: "Материал недоступен." }, 403, headers);
+  const material = parseData(materialRow.data_json, materialId);
+  const groupRows = await env.DB.prepare("SELECT id, archived FROM training_groups")
+    .all<{ id: string; archived: number }>();
+  const activeGroupIds = new Set(groupRows.results.filter((row) => row.archived !== 1).map((row) => row.id));
+  const user = {
+    trainingRole: text(profile?.trainingRole),
+    officeIds: stringList(profile?.officeIds),
+    groupIds: stringList(profile?.groupIds)
+  };
+  if (!isAdmin && (material.archived === true || !canAccessContent(material.audience, user, activeGroupIds))) {
+    return json({ message: "Материал недоступен." }, 403, headers);
+  }
+
+  const progressId = `${authUser.localId}_${materialId}`;
+  const fields: Record<string, FirestoreValue> = {
+    userId: { stringValue: authUser.localId },
+    materialId: { stringValue: materialId },
+    materialTitle: { stringValue: text(material.title) },
+    completedAt: { timestampValue: new Date().toISOString() }
+  };
+  const response = await fetch(
+    `https://firestore.googleapis.com/v1/projects/${env.FIREBASE_PROJECT_ID}/databases/(default)/documents/` +
+      `learningProgress/${encodeURIComponent(progressId)}`,
+    {
+      method: "PATCH",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ fields })
+    }
+  );
+  if (!response.ok) throw new Error(`Firestore progress write failed: ${response.status}`);
+  const progress = (await response.json()) as FirestoreDocument;
+
+  let d1Synced = false;
+  try {
+    const runId = await ensureLiveSyncRun(env, "learningProgress", authUser.localId);
+    await savePage(env, "learningProgress", [progress], runId);
+    d1Synced = true;
+  } catch (error) {
+    console.error("Confirmed progress D1 synchronization failed", error);
+  }
+  return json({ completed: true, materialId, d1Synced }, 200, headers);
+}
+
 function cleanupStatements(env: Env, collection: string, runId: string) {
   const statements = [
     env.DB.prepare(DELETE_STALE_MIGRATION_DOCUMENTS_SQL).bind(collection, runId, runId)
@@ -703,6 +771,9 @@ export default {
       }
       if (request.method === "POST" && url.pathname === "/v1/confirmed-progress") {
         return await syncConfirmedProgress(request, env, headers);
+      }
+      if (request.method === "POST" && url.pathname === "/v1/complete-progress") {
+        return await completeProgress(request, env, headers);
       }
       if (request.method === "POST" && url.pathname === "/admin/migrate-page") {
         return await migratePage(request, env, headers);
