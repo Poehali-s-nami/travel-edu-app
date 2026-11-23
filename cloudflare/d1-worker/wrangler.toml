@@ -5,12 +5,12 @@ compatibility_flags = ["nodejs_compat"]
 workers_dev = false
 preview_urls = false
 
-[triggers]
-crons = ["15 21 * * *"]
-
 routes = [
   { pattern = "api.psnhub.kz", custom_domain = true }
 ]
+
+[triggers]
+crons = ["15 21 * * *"]
 
 [observability]
 enabled = true
