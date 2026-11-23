@@ -32,6 +32,7 @@ import {
   Mail,
   Menu,
   Phone,
+  RefreshCw,
   Search,
   ShieldCheck,
   UserRound,
@@ -147,6 +148,7 @@ export default function Home() {
   const [videoFormatFilter, setVideoFormatFilter] = useState("Все видео");
   const [videoSort, setVideoSort] = useState("newest");
   const [videoCategories, setVideoCategories] = useState<string[]>([]);
+  const [isContentLoading, setIsContentLoading] = useState(false);
   const [contentLoadError, setContentLoadError] = useState(false);
 
   useEffect(() => {
@@ -473,6 +475,7 @@ export default function Home() {
 
   useEffect(() => {
     if (!user || isAdmin || !canUsePlatform) {
+      setIsContentLoading(false);
       if (!isAdmin) {
         setMaterials([]);
         setTracks([]);
@@ -485,6 +488,7 @@ export default function Home() {
     let revision = 0;
     setMaterials([]);
     setTracks([]);
+    setIsContentLoading(true);
     setContentLoadError(false);
     const refresh = () => {
       const currentRevision = ++revision;
@@ -498,10 +502,12 @@ export default function Home() {
           return views === material.views ? material : { ...material, views };
         }));
         setTracks(content.tracks);
+        setIsContentLoading(false);
         setContentLoadError(false);
       }).catch((error) => {
         if (cancelled || currentRevision !== revision) return;
         console.warn("Content could not be loaded:", error);
+        setIsContentLoading(false);
         setContentLoadError(true);
       });
     };
@@ -1071,13 +1077,18 @@ export default function Home() {
                 </select>
               </div>
             ) : null}
-            <div className="flex items-center justify-between">
+            <div className="flex min-h-5 items-center justify-between">
               <p className="text-sm font-medium text-slate-500">
-                Найдено: {visibleItemsCount}
+                {isContentLoading ? "Загружаем материалы..." : `Найдено: ${visibleItemsCount}`}
               </p>
             </div>
 
-            {visibleItemsCount > 0 ? (
+            {isContentLoading ? (
+              <div role="status" className="flex min-h-36 items-center justify-center gap-3 rounded-lg bg-white p-8 text-sm font-medium text-slate-600 shadow-sm ring-1 ring-slate-200/70">
+                <RefreshCw className="h-5 w-5 animate-spin text-[#ea6a00]" aria-hidden="true" />
+                Загружаем доступные материалы
+              </div>
+            ) : visibleItemsCount > 0 ? (
               <div className="grid gap-5 md:grid-cols-2 xl:grid-cols-3">
                 {activeTab === "tracks"
                   ? paginatedTracks.map((track) => (
