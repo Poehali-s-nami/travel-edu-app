@@ -35,7 +35,7 @@ CRM-выгрузка может содержать служебные строк
 В PowerShell из папки проекта:
 
 ```powershell
-$env:GOOGLE_APPLICATION_CREDENTIALS="C:\Users\ROG STRIX\Documents\Firebase Keys\travel-edu-app-firebase-adminsdk-fbsvc-083d82bfe8.json"
+$env:GOOGLE_APPLICATION_CREDENTIALS="C:\secure\travel-edu-app-service-account.json"
 $env:PSN_HUB_WEEKLY_CODE="сюда-вставить-новый-код-12-символов-или-больше"
 npm run sync:users -- "C:\путь\к\выгрузке-users.xlsx"
 ```
