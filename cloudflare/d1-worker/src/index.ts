@@ -1,4 +1,5 @@
 import { DELETE_STALE_MIGRATION_DOCUMENTS_SQL } from "./migration-cleanup";
+import { runScheduledSync } from "./scheduled-sync";
 
 interface Env {
   DB: D1Database;
@@ -609,6 +610,40 @@ function cleanupStatements(env: Env, collection: string, runId: string) {
   return statements;
 }
 
+async function migrateEntireCollection(env: Env, collection: string, actor: string) {
+  const runId = crypto.randomUUID();
+  await env.DB.prepare(`INSERT INTO migration_runs
+    (id, collection_name, status, started_at, initiated_by)
+    VALUES (?, ?, 'running', ?, ?)`)
+    .bind(runId, collection, new Date().toISOString(), actor).run();
+
+  try {
+    const token = await firestoreToken(env);
+    let pageToken = "";
+    do {
+      const page = await readFirestorePage(env, token, collection, pageToken, 100);
+      await savePage(env, collection, page.documents ?? [], runId);
+      pageToken = page.nextPageToken ?? "";
+    } while (pageToken);
+    await env.DB.batch(cleanupStatements(env, collection, runId));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Scheduled migration failed";
+    await env.DB.prepare("UPDATE migration_runs SET status='failed', completed_at=?, error_message=? WHERE id=?")
+      .bind(new Date().toISOString(), message.slice(0, 1000), runId).run();
+    throw error;
+  }
+}
+
+async function scheduledServiceCollectionSync(env: Env) {
+  const failures = await runScheduledSync(
+    (collection) => migrateEntireCollection(env, collection, "cloudflare-scheduled-sync"),
+    (collection, error) => console.error(`Scheduled ${collection} synchronization failed`, error)
+  );
+  if (failures.length > 0) {
+    throw new Error(`Scheduled synchronization failed for: ${failures.join(", ")}`);
+  }
+}
+
 async function migratePage(request: Request, env: Env, headers: HeadersInit) {
   const admin = await verifyAdmin(request, env);
   if (!admin?.email) return json({ message: "Нет прав администратора." }, 403, headers);
@@ -786,6 +821,9 @@ export default {
       console.error("D1 API request failed", error);
       return json({ message: "Временная ошибка сервиса данных." }, 503, headers);
     }
+  },
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(scheduledServiceCollectionSync(env));
   }
 };
 
