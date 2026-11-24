@@ -65,6 +65,11 @@ import { TrackMaterialPicker } from "@/components/TrackMaterialPicker";
 import { TrainingGroupsWorkspace } from "@/components/TrainingGroupsWorkspace";
 import { AUDIENCE_ROLES } from "@/lib/content-access";
 import { syncD1Documents } from "@/lib/d1-admin-sync";
+import {
+  buildImportFileKey,
+  checkpointMatchesFile,
+  type ImportFileIdentity
+} from "@/lib/import-resume";
 import { UnsavedEditorProvider, useEditorDraft, useEditorNavigation } from "@/components/UnsavedEditor";
 import type {
   ContentTab,
@@ -178,6 +183,9 @@ type ImportTotals = {
 
 type ImportCheckpoint = {
   fileKey: string;
+  fileName?: string;
+  fileSize?: number;
+  recordCount?: number;
   totalBatches: number;
   nextBatchIndex: number;
   nextRequestIndex?: number;
@@ -530,7 +538,7 @@ function AdminWorkspace({
   const [trainingGroups, setTrainingGroups] = useState<TrainingGroup[]>([]);
   const [manualUserForm, setManualUserForm] = useState(initialManualUserForm);
   const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
-  const [importFileKey, setImportFileKey] = useState("");
+  const [importFileIdentity, setImportFileIdentity] = useState<ImportFileIdentity | null>(null);
   const [importConflicts, setImportConflicts] = useState<ImportConflict[]>([]);
   const [importArchiveMissing, setImportArchiveMissing] = useState(false);
   const [importTemporaryPassword, setImportTemporaryPassword] = useState("");
@@ -1121,7 +1129,7 @@ function AdminWorkspace({
 
     setMessage("");
     setImportPreview(null);
-    setImportFileKey("");
+    setImportFileIdentity(null);
     setImportConflicts([]);
 
     try {
@@ -1139,10 +1147,35 @@ function AdminWorkspace({
       });
 
       const preview = buildImportPreview(file.name, rows);
+      const logicalContents = {
+        users: preview.validUsers,
+        blockedCrmIdsWithoutLogin: preview.blockedCrmIdsWithoutLogin,
+        isActiveUsersReport: preview.isActiveUsersReport
+      };
+      const identity: ImportFileIdentity = {
+        fileKey: buildImportFileKey(logicalContents, preview.validUsers.length),
+        fileName: file.name,
+        fileSize: file.size,
+        recordCount: preview.validUsers.length
+      };
       setImportPreview(preview);
-      setImportFileKey(`${file.name}:${file.size}:${file.lastModified}:${preview.validUsers.length}`);
+      setImportFileIdentity(identity);
       setImportArchiveMissing(false);
       setImportTemporaryPassword("");
+
+      const checkpoint = readImportCheckpoint();
+      const totalBatches = Math.ceil(preview.validUsers.length / CRM_IMPORT_BATCH_SIZE);
+      if (
+        checkpoint &&
+        checkpointMatchesFile(checkpoint, identity) &&
+        checkpoint.totalBatches === totalBatches &&
+        checkpoint.nextBatchIndex >= 0 &&
+        checkpoint.nextBatchIndex <= totalBatches
+      ) {
+        setMessage(
+          `Найдена сохранённая точка импорта. Уже подтверждено: ${checkpoint.result.imported} пользователей. После ввода того же временного пароля импорт продолжится с места остановки.`
+        );
+      }
     } catch (error) {
       console.error("Failed to parse CRM import file:", error);
       setMessage("Не удалось прочитать Excel-файл. Проверьте, что это .xlsx выгрузка CRM.");
@@ -1152,7 +1185,7 @@ function AdminWorkspace({
   async function handleWebImportSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    if (!user || !isAdmin || !importPreview) {
+    if (!user || !isAdmin || !importPreview || !importFileIdentity) {
       setMessage("Для импорта нужно войти под администратором и выбрать файл.");
       return;
     }
@@ -1195,7 +1228,7 @@ function AdminWorkspace({
     let checkpoint = readImportCheckpoint();
     let canResume = Boolean(
       checkpoint &&
-      checkpoint.fileKey === importFileKey &&
+      checkpointMatchesFile(checkpoint, importFileIdentity) &&
       checkpoint.totalBatches === batches.length &&
       checkpoint.nextBatchIndex >= 0 &&
       checkpoint.nextBatchIndex <= batches.length
@@ -1363,7 +1396,10 @@ function AdminWorkspace({
 
           const requestCompletedBatch = requestIndex + 1 >= requestBatches.length;
           writeImportCheckpoint({
-            fileKey: importFileKey,
+            fileKey: importFileIdentity.fileKey,
+            fileName: importFileIdentity.fileName,
+            fileSize: importFileIdentity.fileSize,
+            recordCount: importFileIdentity.recordCount,
             totalBatches: batches.length,
             nextBatchIndex: requestCompletedBatch ? batchIndex + 1 : batchIndex,
             nextRequestIndex: requestCompletedBatch ? 0 : requestIndex + 1,
